@@ -53,64 +53,71 @@ def find_outer_card_quad(img_bgr):
 
 def find_inner_frame_rect(warped_bgr):
     """
-    MVP heuristic:
-    - find strong rectangular contour inside the card after warping
-    - chooses the largest 4-point contour not touching outer edge
-    This will be refined per set (Optic/Prizm frames vary).
+    More robust inner-frame detection:
+    - enhance contrast
+    - adaptive threshold to bring out the frame edges
+    - line/rectangle-friendly morphology
+    - pick the best interior rectangular contour
     """
     h, w = warped_bgr.shape[:2]
+
     gray = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3,3), 0)
-    edges = cv2.Canny(gray, 50, 140)
+    gray = cv2.bilateralFilter(gray, 7, 50, 50)  # preserves edges better than blur
 
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=2)
+    # Boost local contrast (helps chrome/glare situations)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
 
-    cnts, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    # Adaptive threshold to isolate high-contrast frame boundaries
+    th = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        31, 7
+    )
+
+    # Morphology to connect frame lines
+    k = max(3, min(h, w) // 200)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    # Find contours
+    cnts, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    margin = int(min(h, w) * 0.04)  # must be clearly inside the outer card
     best = None
-    best_area = 0
-
-    margin = int(min(h, w) * 0.03)  # must be inside card by this margin
+    best_score = -1
 
     for c in cnts:
         area = cv2.contourArea(c)
-        if area < (h*w)*0.05:
+        if area < (h * w) * 0.06:
             continue
+
         peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02*peri, True)
+        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+
         if len(approx) != 4:
             continue
-        pts = approx.reshape(4,2)
-        x, y, ww, hh = cv2.boundingRect(pts)
 
-        # reject things that hug the outer edge (likely the card itself)
-        if x < margin or y < margin or (x+ww) > (w-margin) or (y+hh) > (h-margin):
+        x, y, ww, hh = cv2.boundingRect(approx)
+
+        # Must be inside and not hugging edges (avoid selecting the card itself)
+        if x < margin or y < margin or (x + ww) > (w - margin) or (y + hh) > (h - margin):
             continue
 
-        if area > best_area:
-            best_area = area
-            best = pts
+        # Prefer "frame-like" rectangles: large, but not too large; decent aspect match
+        rect_area = ww * hh
+        fill_ratio = area / rect_area  # frames often have slightly lower fill_ratio than solid blocks
+        aspect = ww / max(1, hh)
 
-    if best is None:
-        return None
+        # Score: big interior rectangles with reasonable fill
+        score = rect_area * (1.0 - abs(fill_ratio - 0.85)) * (1.0 - abs(aspect - (w/h))*0.2)
 
-    # return axis-aligned rect from the 4 points (post-warp mostly axis aligned)
-    x, y, ww, hh = cv2.boundingRect(best)
-    return (x, y, x+ww, y+hh)
+        if score > best_score:
+            best_score = score
+            best = (x, y, x + ww, y + hh)
 
-def classify_centering(gL, gR, gT, gB):
-    lr = max(gL, gR) / (gL + gR)
-    tb = max(gT, gB) / (gT + gB)
-    worst = max(lr, tb)
-
-    if worst <= CLEAR_PASS_MAX:
-        bucket = "CLEAR PASS"
-    elif worst <= BORDERLINE_HIGH:
-        bucket = "BORDERLINE (request better photo; if not possible = uncertain)"
-    else:
-        bucket = "FAIL"
-
-    within_55 = (lr <= PSA_LIMIT) and (tb <= PSA_LIMIT)
-    return lr, tb, bucket, within_55
+    return best
 
 def corner_risk(warped_bgr):
     # simple sharpness heuristic per corner ROI

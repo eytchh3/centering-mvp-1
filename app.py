@@ -38,18 +38,28 @@ def warp_card(img_bgr, quad, out_w=900):
 def find_outer_card_quad(img_bgr):
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (5,5), 0)
-    edges = cv2.Canny(gray, 60, 160)
+
+    # stronger edges for busy backgrounds
+    edges = cv2.Canny(gray, 40, 130)
     edges = cv2.dilate(edges, None, iterations=2)
+    edges = cv2.erode(edges, None, iterations=1)
 
     cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
+    if not cnts:
+        return None
 
-    for c in cnts[:15]:
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-        if len(approx) == 4 and cv2.contourArea(approx) > 0.10 * (img_bgr.shape[0]*img_bgr.shape[1]):
-            return approx.reshape(4,2)
-    return None
+    # largest contour by area
+    c = max(cnts, key=cv2.contourArea)
+
+    # reject tiny detections
+    if cv2.contourArea(c) < 0.03 * (img_bgr.shape[0] * img_bgr.shape[1]):
+        return None
+
+    # minAreaRect gives a rotated rectangle even if edges aren't perfect
+    rect = cv2.minAreaRect(c)
+    box = cv2.boxPoints(rect)  # 4 points
+    box = np.array(box, dtype="float32")
+    return box
 
 def find_inner_frame_rect(warped_bgr):
     """
@@ -150,9 +160,15 @@ def analyze(img_pil: Image.Image):
     img_rgb = np.array(img_pil.convert("RGB"))
     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
+    # debug edge view
+dbg_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+dbg_gray = cv2.GaussianBlur(dbg_gray, (5,5), 0)
+dbg_edges = cv2.Canny(dbg_gray, 40, 130)
+dbg_edges_rgb = cv2.cvtColor(dbg_edges, cv2.COLOR_GRAY2RGB)
+
     quad = find_outer_card_quad(img_bgr)
     if quad is None:
-        return "Insufficient photo quality: could not detect full card edges.", None
+    return "Insufficient photo quality: could not detect full card outline (outer edges).", Image.fromarray(dbg_edges_rgb)
 
     warped, outer_rect_pts = warp_card(img_bgr, quad)
 

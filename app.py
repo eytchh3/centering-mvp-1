@@ -155,10 +155,9 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
     col_s = smooth1d(col, k=max(25, w // 60))
     row_s = smooth1d(row, k=max(25, h // 60))
 
-    # Search band where inner frame likely lives (inset from outer edge)
-    # Tunable, but these are good starting points for modern chrome cards.
-    x_lo, x_hi = int(w * 0.04), int(w * 0.22)
-    y_lo, y_hi = int(h * 0.04), int(h * 0.22)
+    # Optic-style cards: frame boundary is usually close to the edge
+    x_lo, x_hi = int(w * 0.02), int(w * 0.14)
+    y_lo, y_hi = int(h * 0.02), int(h * 0.14)
 
     # Find "knee" where edge density jumps (border -> interior)
     def find_boundary_from_left(profile, lo, hi):

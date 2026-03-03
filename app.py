@@ -157,13 +157,13 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
     row_full = edges[:, xC1:xC2].sum(axis=1) / 255.0
     row_full_s = smooth1d(row_full, k=max(25, h // 80))
 
-    # Dynamic y_cut: find strongest band in lower region (often nameplate edge) and cut above it
-    search_start = int(h * 0.55)
+    # Only search for the nameplate band in the bottom ~28% of the card
+    search_start = int(h * 0.72)
     band = row_full_s[search_start:]
     peak_idx = int(np.argmax(band)) + search_start
     # Cut above the peak, but keep enough bottom content
-    y_cut = max(int(h * 0.70), peak_idx - int(h * 0.06))
-    y_cut = int(np.clip(y_cut, int(h * 0.65), int(h * 0.90)))
+    y_cut = peak_idx - int(h * 0.05)             # cut a bit above the nameplate peak
+    y_cut = int(np.clip(y_cut, int(h * 0.75), int(h * 0.92)))
 
     row = edges[:y_cut, xC1:xC2].sum(axis=1) / 255.0
 
@@ -240,9 +240,8 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
 
     # extra guardrail: bottom boundary should not be absurdly far from edge
     # (if it is, it's likely nameplate/artwork edge)
-    bottom_gap = h - y2
-    if bottom_gap > int(h * 0.22):
-        dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
+    bottom_gap = y_cut - y2
+    if bottom_gap > int(h * 0.10):
         return None, dbg_rgb
 
     # shrink inner boundary slightly inward to avoid glow/halo edges

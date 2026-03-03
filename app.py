@@ -10,9 +10,14 @@ PSA_LIMIT = 0.55
 CLEAR_PASS_MAX = 0.54
 BORDERLINE_HIGH = 0.56
 
-# Inner-box geometry tweaks
-INNER_HEIGHT_SCALE = 1.00   # 1.00 = exact outer aspect; bump slightly if Optic inner is taller
+INNER_HEIGHT_SCALE = 1.00   # global; stays general
 INNER_PAD_FRAC = 0.002      # small inset to avoid halo/glow edges
+
+# vertical placement search (general-purpose)
+Y_SCAN_TOP = 0.06           # don't search too close to top
+Y_SCAN_BOTTOM = 0.92        # don't search too close to bottom
+Y_SCAN_STEP_FRAC = 0.004    # step as fraction of height (smaller = slower but more precise)
+EDGE_BAND = 3               # pixels above/below line to score horizontal rail strength
 
 
 # -----------------------------
@@ -53,7 +58,7 @@ def warp_card(img_bgr: np.ndarray, quad: np.ndarray, out_w: int = 900):
 
 
 # -----------------------------
-# OUTER quad detection (robust + avoids screenshot frame)
+# OUTER quad detection
 # -----------------------------
 def _score_candidate_quad(pts: np.ndarray, area: float, H: int, W: int) -> float:
     pts_o = order_points(pts)
@@ -64,7 +69,7 @@ def _score_candidate_quad(pts: np.ndarray, area: float, H: int, W: int) -> float
     if ww < 80 or hh < 80:
         return -1.0
 
-    aspect = min(ww, hh) / max(ww, hh)  # ~0.714
+    aspect = min(ww, hh) / max(ww, hh)
     if not (0.62 <= aspect <= 0.80):
         return -1.0
 
@@ -75,7 +80,6 @@ def _score_candidate_quad(pts: np.ndarray, area: float, H: int, W: int) -> float
 
     margin = min(minx, miny, (W - 1) - maxx, (H - 1) - maxy)
     margin_norm = margin / float(min(H, W))
-
     if margin_norm < 0.01:
         return -1.0
 
@@ -140,7 +144,6 @@ def find_outer_card_quad(img_bgr: np.ndarray):
     if quad is not None:
         return quad, edges
 
-    # fallback: mask bottom (stands sometimes)
     edges2 = edges.copy()
     cut = int(H * 0.78)
     edges2[cut:, :] = 0
@@ -152,7 +155,7 @@ def find_outer_card_quad(img_bgr: np.ndarray):
 
 
 # -----------------------------
-# INNER boundary: reliable L/R → fit height → vertical center
+# INNER boundary: detect L/R, then scan Y for best top+bottom rails
 # -----------------------------
 def _smooth1d(a: np.ndarray, k: int) -> np.ndarray:
     k = max(9, k | 1)
@@ -160,64 +163,86 @@ def _smooth1d(a: np.ndarray, k: int) -> np.ndarray:
     return np.convolve(a.astype(np.float32), ker, mode="same")
 
 
-def find_inner_by_lr_fit(warped_bgr: np.ndarray):
-    """
-    Returns:
-      rect (x1,y1,x2,y2) or None
-      confident: bool
-      overlay_rgb: overlay drawn on warped image (thin hashmarks)
-    """
+def find_inner_general(warped_bgr: np.ndarray):
     h, w = warped_bgr.shape[:2]
     overlay = warped_bgr.copy()
 
     gray = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2GRAY)
-
-    # CLAHE helps holo/glare
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     g = clahe.apply(gray)
     g = cv2.GaussianBlur(g, (3, 3), 0)
 
-    # Sobel vertical energy for rails
-    sx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
-    sx = np.abs(sx)
+    # Sobel energies
+    sx = np.abs(cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3))  # vertical rails
+    sy = np.abs(cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3))  # horizontal rails
 
-    yA, yB = int(h * 0.18), int(h * 0.78)  # avoid top logo + bottom nameplate
+    # L/R from vertical energy mid-band
+    yA, yB = int(h * 0.18), int(h * 0.78)
     col_energy = sx[yA:yB, :].mean(axis=0)
     col_energy = _smooth1d(col_energy, k=max(31, w // 45))
 
-    # Search L/R within 2–14% of width
     x_lo, x_hi = int(w * 0.02), int(w * 0.14)
     winL = col_energy[x_lo:x_hi]
     winR = col_energy[w - x_hi:w - x_lo]
-
     if winL.size < 10 or winR.size < 10:
         return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
     x1 = x_lo + int(np.argmax(winL))
     x2 = (w - x_lo) - int(np.argmax(winR[::-1]))
-
     if x2 <= x1 + int(w * 0.30):
         return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
     inner_w = float(x2 - x1)
 
-    # Compute height from OUTER aspect (height/width) and optional scale
+    # Height from outer aspect (general)
     outer_aspect = h / float(w)
     inner_h = inner_w * outer_aspect * INNER_HEIGHT_SCALE
+    inner_h = float(np.clip(inner_h, h * 0.55, h * 0.92))
 
-    # Vertical center fit
-    y_center = h / 2.0
-    y1 = int(y_center - inner_h / 2.0)
-    y2 = int(y_center + inner_h / 2.0)
-
-    # Clamp to safe region: don’t let it reach extreme top/bottom
-    y1 = max(int(h * 0.03), y1)
-    y2 = min(int(h * 0.97), y2)
-
-    if y2 <= y1 + int(h * 0.35):
+    # Score function: horizontal energy around y for top and around y+inner_h for bottom
+    padx0 = int(x1 + inner_w * 0.10)
+    padx1 = int(x2 - inner_w * 0.10)
+    padx0 = max(0, padx0)
+    padx1 = min(w, padx1)
+    if padx1 - padx0 < 40:
         return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
-    # Small inset pad to avoid halo/glow edges
+    def line_strength(y: int) -> float:
+        y0 = max(0, y - EDGE_BAND)
+        y1 = min(h, y + EDGE_BAND + 1)
+        return float(sy[y0:y1, padx0:padx1].mean())
+
+    y_start = int(h * Y_SCAN_TOP)
+    y_end = int(h * Y_SCAN_BOTTOM - inner_h)
+    step = max(2, int(h * Y_SCAN_STEP_FRAC))
+    if y_end <= y_start:
+        return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+
+    best = None
+    best_score = -1.0
+
+    for y_top in range(y_start, y_end, step):
+        y_bot = int(y_top + inner_h)
+        s_top = line_strength(y_top)
+        s_bot = line_strength(y_bot)
+
+        # Prefer both being strong, but penalize if one is super weak
+        score = (s_top + s_bot) - 0.5 * abs(s_top - s_bot)
+
+        if score > best_score:
+            best_score = score
+            best = (y_top, y_bot, s_top, s_bot)
+
+    if best is None:
+        return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+
+    y1, y2, sT, sB = best
+
+    # Confidence: both rails must exceed a minimal strength
+    # (this is adaptive-ish because sy scale varies, but works okay)
+    confident = (sT > 6.0) and (sB > 6.0)
+
+    # Apply small inset pad
     pad = int(min(h, w) * INNER_PAD_FRAC)
     x1p = int(x1 + pad)
     x2p = int(x2 - pad)
@@ -227,19 +252,9 @@ def find_inner_by_lr_fit(warped_bgr: np.ndarray):
     if x2p <= x1p or y2p <= y1p:
         return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
-    # Confidence: rails should be noticeably stronger than nearby columns
-    # (simple check to avoid crazy picks)
-    band = int(max(3, w * 0.01))
-    left_strength = col_energy[max(0, x1 - band):min(w, x1 + band)].mean()
-    right_strength = col_energy[max(0, x2 - band):min(w, x2 + band)].mean()
-    mid_strength = col_energy[int(w * 0.45):int(w * 0.55)].mean()
-    confident = (left_strength > 1.10 * mid_strength) and (right_strength > 1.10 * mid_strength)
-
-    # Draw:
-    # Green outer handled elsewhere; draw inner as blue if confident, orange if not
     color = (255, 0, 0) if confident else (0, 165, 255)
 
-    # thin hashmarks/lines
+    # thin box + hash lines
     cv2.rectangle(overlay, (x1p, y1p), (x2p, y2p), color, 2)
     cv2.line(overlay, (x1p, 0), (x1p, h - 1), color, 1)
     cv2.line(overlay, (x2p, 0), (x2p, h - 1), color, 1)
@@ -304,7 +319,7 @@ def corner_risk(warped_bgr: np.ndarray):
 
 
 # -----------------------------
-# Main analysis function
+# Main analysis
 # -----------------------------
 def analyze(img_pil: Image.Image):
     try:
@@ -322,26 +337,19 @@ def analyze(img_pil: Image.Image):
             return "Insufficient photo quality: outline detected but warp failed.", Image.fromarray(edge_rgb)
 
         h, w = warped.shape[:2]
-
-        # Start overlay with outer box
         overlay = warped.copy()
         cv2.rectangle(overlay, (0, 0), (w - 1, h - 1), (0, 255, 0), 2)
 
-        inner, confident, overlay_rgb = find_inner_by_lr_fit(warped)
-
+        inner, confident, overlay_rgb = find_inner_general(warped)
         if inner is None:
-            msg = "UNCERTAIN: could not detect inner L/R rails reliably."
+            msg = "UNCERTAIN: could not detect inner boundary reliably."
             overlay_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
             return msg, Image.fromarray(overlay_rgb)
 
-        # overlay_rgb already includes the inner box drawing
         x1, y1, x2, y2 = inner
 
         if not confident:
-            msg = (
-                "UNCERTAIN: inner boundary may be unreliable.\n"
-                "Orange = candidate; do not trust centering."
-            )
+            msg = "UNCERTAIN: candidate found but not reliable (orange)."
             return msg, Image.fromarray(overlay_rgb)
 
         gL = int(x1)
@@ -364,7 +372,8 @@ def analyze(img_pil: Image.Image):
             f"Corners (photo-based risk): {corners}\n\n"
             "Trust check:\n"
             "- Green box = outer card bounds after flatten.\n"
-            "- Blue box = inner boundary (LR-fit + centered height).\n"
+            "- Blue box = detected inner boundary.\n"
+            "- Orange box = candidate but uncertain.\n"
         )
 
         return msg, Image.fromarray(overlay_rgb)
@@ -373,9 +382,6 @@ def analyze(img_pil: Image.Image):
         return f"Error: {type(e).__name__}: {e}", Image.new("RGB", (10, 10), (0, 0, 0))
 
 
-# -----------------------------
-# Gradio App
-# -----------------------------
 demo = gr.Interface(
     fn=analyze,
     inputs=gr.Image(type="pil", label="Upload FRONT screenshot/photo"),
@@ -384,7 +390,7 @@ demo = gr.Interface(
         gr.Image(type="pil", label="Overlay / Debug (what was measured)"),
     ],
     title="Card Pre-Grade (Front Only) — Centering 55/45 + Corner Risk",
-    description="Uses robust outer flattening + inner L/R rail detection, then fits an inner box by geometry and vertical centering.",
+    description="General approach: detect inner L/R rails + scan vertical placement to maximize top+bottom rail alignment.",
 )
 
 if __name__ == "__main__":

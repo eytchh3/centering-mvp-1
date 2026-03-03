@@ -245,7 +245,7 @@ y1, y2, sT, sB = best
 
     # Confidence: both rails must exceed a minimal strength
     # (this is adaptive-ish because sy scale varies, but works okay)
-    confident = (sT > 6.0) and (sB > 6.0)
+confident = (sT > 6.0) and (sB > 6.0)
 
     # Apply small inset pad
     pad = int(min(h, w) * INNER_PAD_FRAC)

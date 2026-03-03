@@ -209,6 +209,20 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
         reverse_map=lambda idx: (w - x_lo) - idx
     )
 
+    # If L/R rails aren't found, stop
+    dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+    cv2.line(dbg, (0, int(y_cut)), (w - 1, int(y_cut)), (255, 255, 0), 2)
+    
+    if x1 is None or x2 is None:
+        dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
+        return None, dbg_rgb
+    
+    # Estimate expected inner height from measured inner width
+    outer_aspect = h / float(w)
+    inner_w = float(x2 - x1)
+    expected_inner_h = inner_w * outer_aspect
+    expected_inner_h = float(np.clip(expected_inner_h, h * 0.55, h * 0.92))
+    
     # Top
     winT = row_s[y_lo:y_hi]
     y1 = first_or_grad(winT, y_lo)

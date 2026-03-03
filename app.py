@@ -257,12 +257,12 @@ def analyze(img_pil: Image.Image):
     overlay = warped.copy()
 
     if inner is None:
-    th_rgb = cv2.cvtColor(th, cv2.COLOR_GRAY2RGB)
-    return (
-        "Insufficient evidence: could not reliably detect INNER printed frame.\n"
-        "Debug image shows what the frame detector sees (white = detected structures).\n",
-        Image.fromarray(th_rgb),
-    )
+        th_rgb = cv2.cvtColor(th, cv2.COLOR_GRAY2RGB)
+        return (
+            "Insufficient evidence: could not reliably detect INNER printed frame.\n"
+            "Debug image shows what the frame detector sees (white = detected structures).\n",
+            Image.fromarray(th_rgb),
+        )
 
     # Gaps from OUTER card edge to INNER frame
     gL = int(x1)

@@ -9,7 +9,7 @@ from PIL import Image
 PSA_LIMIT = 0.55
 CLEAR_PASS_MAX = 0.54
 BORDERLINE_HIGH = 0.56
-
+INNER_ASPECT_SCALE = 1.035
 
 # -----------------------------
 # Geometry helpers
@@ -218,7 +218,7 @@ def find_inner_boundary_rect(warped_bgr: np.ndarray):
 
     outer_aspect = h / float(w)
     inner_w = float(x2 - x1)
-    expected_h = float(np.clip(inner_w * outer_aspect, h * 0.55, h * 0.92))
+    expected_h = float(np.clip(inner_w * outer_aspect * INNER_ASPECT_SCALE, h * 0.55, h * 0.92))
     y2 = int(y1 + expected_h)
 
     # Clamp away from extreme bottom zone

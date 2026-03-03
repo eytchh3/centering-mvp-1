@@ -242,7 +242,7 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
     x1 += pad; y1 += pad; x2 -= pad; y2 -= pad
 
     if x2 <= x1 or y2 <= y1:
-    return None, dbg_rgb
+        return None, dbg_rgb
 
 
 # -----------------------------

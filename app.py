@@ -295,7 +295,22 @@ def analyze(img_pil: Image.Image):
         )
 
     inner, dbg = find_inner_frame_rect(warped)
+
+    if inner is None:
+        return (
+            "Insufficient evidence: could not reliably detect INNER printed frame boundary.\n"
+            "Debug image shows detected edges + the attempted boundary box (if any).",
+            Image.fromarray(dbg),
+        )
+
+    x1, y1, x2, y2 = inner  # <-- ADD THIS
+
     h, w = warped.shape[:2]
+
+    gL = int(x1)
+    gR = int(w - x2)
+    gT = int(y1)
+    gB = int(h - y2)
 
     overlay = warped.copy()
 

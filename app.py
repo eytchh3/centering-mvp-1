@@ -152,7 +152,9 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
     col = edges[yA:yB, :].sum(axis=0) / 255.0
     # For top/bottom boundary, use a central vertical strip to avoid nameplate/logo edges
     xC1, xC2 = int(w * 0.25), int(w * 0.75)
-    row = edges[:, xC1:xC2].sum(axis=1) / 255.0
+    # Ignore the nameplate region for top/bottom detection
+    y_cut = int(h * 0.80)  # everything below this tends to be nameplate/labels/stand noise
+    row = edges[:y_cut, xC1:xC2].sum(axis=1) / 255.0
 
     col_s = smooth1d(col, k=max(25, w // 60))
     row_s = smooth1d(row, k=max(25, h // 60))
@@ -212,22 +214,21 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
         return lo + int(np.argmax(grad))
 
     def find_boundary_from_bottom(profile, lo, hi):
-        window = profile[h - hi : h - lo][::-1]
+        row_h = len(profile)
+        window = profile[row_h - hi : row_h - lo][::-1]
         if window.size < 10:
             return None
         base = np.median(window[: max(5, window.size // 5)])
         thr = max(base * 1.8, base + 20)
 
-        # First-hit (preferred)
         for i, v in enumerate(window):
             if v >= thr:
-                return (h - lo) - i
+                return (row_h - lo) - i
 
-        # Fallback: strongest gradient within the band
         grad = np.abs(np.diff(window))
         if grad.size == 0:
             return None
-        return (h - lo) - int(np.argmax(grad))
+        return (row_h - lo) - int(np.argmax(grad))
 
     x1 = find_boundary_from_left(col_s, x_lo, x_hi)
     x2 = find_boundary_from_right(col_s, x_lo, x_hi)

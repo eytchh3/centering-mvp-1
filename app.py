@@ -95,97 +95,117 @@ def find_outer_card_quad(img_bgr: np.ndarray):
 # -----------------------------
 def find_inner_frame_rect(warped_bgr: np.ndarray):
     """
-    Inner frame detection via strong straight lines:
-    - edge detect
-    - Hough lines
-    - pick 2 vertical + 2 horizontal lines that form a rectangle
-    Returns: (rect, debug_img)
+    Detect inner frame by scanning inward from each edge for a strong change in edge density.
+    Works better on Optic-style designs where the 'frame' isn't a crisp rectangle.
+    Returns: (rect, debug_rgb)
       rect = (x1,y1,x2,y2) or None
-      debug_img = RGB image showing detected lines
     """
     h, w = warped_bgr.shape[:2]
-
     gray = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # edges (less speckle than adaptive threshold)
+    # Edge map of the flattened card
     edges = cv2.Canny(gray, 60, 160)
 
-    # close small gaps in the frame lines
-    k = max(3, min(h, w) // 250)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+    # Smooth edge counts to reduce noise from text/player
+    def smooth1d(a, k=25):
+        k = max(5, k | 1)  # odd
+        pad = k // 2
+        ap = np.pad(a.astype(np.float32), (pad, pad), mode="edge")
+        kernel = np.ones(k, dtype=np.float32) / k
+        return np.convolve(ap, kernel, mode="valid")
 
-    # Hough line transform
-    lines = cv2.HoughLinesP(
-        edges, 1, np.pi / 180,
-        threshold=120,
-        minLineLength=int(min(h, w) * 0.35),
-        maxLineGap=int(min(h, w) * 0.03)
-    )
+    # Compute edge density profiles
+    col = edges.sum(axis=0) / 255.0  # edge pixels per column
+    row = edges.sum(axis=1) / 255.0  # edge pixels per row
+    col_s = smooth1d(col, k=max(25, w // 60))
+    row_s = smooth1d(row, k=max(25, h // 60))
 
-    debug = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-    if lines is None:
-        debug_rgb = cv2.cvtColor(debug, cv2.COLOR_BGR2RGB)
-        return None, debug_rgb
+    # Search band where inner frame likely lives (inset from outer edge)
+    # Tunable, but these are good starting points for modern chrome cards.
+    x_lo, x_hi = int(w * 0.04), int(w * 0.22)
+    y_lo, y_hi = int(h * 0.04), int(h * 0.22)
 
-    # classify lines as vertical-ish or horizontal-ish
-    vertical = []
-    horizontal = []
-    for x1, y1, x2, y2 in lines[:, 0]:
-        dx = x2 - x1
-        dy = y2 - y1
-        length = (dx * dx + dy * dy) ** 0.5
-        if length < 50:
-            continue
-        # angle test
-        if abs(dx) < abs(dy) * 0.35:
-            # vertical-ish: store average x
-            vertical.append((int((x1 + x2) / 2), length, (x1, y1, x2, y2)))
-        elif abs(dy) < abs(dx) * 0.35:
-            # horizontal-ish: store average y
-            horizontal.append((int((y1 + y2) / 2), length, (x1, y1, x2, y2)))
+    # Find "knee" where edge density jumps (border -> interior)
+    def find_boundary_from_left(profile, lo, hi):
+        window = profile[lo:hi]
+        if window.size < 10:
+            return None
+        base = np.median(window[: max(5, window.size // 5)])
+        # boundary = first index where we exceed base by a threshold
+        thr = max(base * 1.8, base + 20)
+        for i, v in enumerate(window):
+            if v >= thr:
+                return lo + i
+        # fallback: max gradient point
+        grad = np.abs(np.diff(window))
+        if grad.size == 0:
+            return None
+        return lo + int(np.argmax(grad))
 
-    # draw debug lines
-    for _, _, (x1, y1, x2, y2) in vertical:
-        cv2.line(debug, (x1, y1), (x2, y2), (0, 255, 0), 2)
-    for _, _, (x1, y1, x2, y2) in horizontal:
-        cv2.line(debug, (x1, y1), (x2, y2), (255, 0, 0), 2)
+    def find_boundary_from_right(profile, lo, hi):
+        # profile is full length; we mirror the right-side window
+        window = profile[w - hi : w - lo][::-1]
+        if window.size < 10:
+            return None
+        base = np.median(window[: max(5, window.size // 5)])
+        thr = max(base * 1.8, base + 20)
+        for i, v in enumerate(window):
+            if v >= thr:
+                return (w - lo) - i
+        grad = np.abs(np.diff(window))
+        if grad.size == 0:
+            return None
+        return (w - lo) - int(np.argmax(grad))
 
-    margin = int(min(h, w) * 0.06)
+    def find_boundary_from_top(profile, lo, hi):
+        window = profile[lo:hi]
+        if window.size < 10:
+            return None
+        base = np.median(window[: max(5, window.size // 5)])
+        thr = max(base * 1.8, base + 20)
+        for i, v in enumerate(window):
+            if v >= thr:
+                return lo + i
+        grad = np.abs(np.diff(window))
+        if grad.size == 0:
+            return None
+        return lo + int(np.argmax(grad))
 
-    # keep only interior-ish candidates (ignore outer border)
-    vertical = [v for v in vertical if margin < v[0] < (w - margin)]
-    horizontal = [u for u in horizontal if margin < u[0] < (h - margin)]
+    def find_boundary_from_bottom(profile, lo, hi):
+        window = profile[h - hi : h - lo][::-1]
+        if window.size < 10:
+            return None
+        base = np.median(window[: max(5, window.size // 5)])
+        thr = max(base * 1.8, base + 20)
+        for i, v in enumerate(window):
+            if v >= thr:
+                return (h - lo) - i
+        grad = np.abs(np.diff(window))
+        if grad.size == 0:
+            return None
+        return (h - lo) - int(np.argmax(grad))
 
-    if len(vertical) < 2 or len(horizontal) < 2:
-        debug_rgb = cv2.cvtColor(debug, cv2.COLOR_BGR2RGB)
-        return None, debug_rgb
+    x1 = find_boundary_from_left(col_s, x_lo, x_hi)
+    x2 = find_boundary_from_right(col_s, x_lo, x_hi)
+    y1 = find_boundary_from_top(row_s, y_lo, y_hi)
+    y2 = find_boundary_from_bottom(row_s, y_lo, y_hi)
 
-    # pick best left/right: far apart, strong lines
-    vertical.sort(key=lambda t: t[0])
-    left = max(vertical[: max(1, len(vertical)//2)], key=lambda t: t[1])
-    right = max(vertical[len(vertical)//2 :], key=lambda t: t[1])
+    # Debug image: show edges + chosen boundaries
+    dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
 
-    # pick best top/bottom
-    horizontal.sort(key=lambda t: t[0])
-    top = max(horizontal[: max(1, len(horizontal)//2)], key=lambda t: t[1])
-    bottom = max(horizontal[len(horizontal)//2 :], key=lambda t: t[1])
+    if None in (x1, x2, y1, y2):
+        dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
+        return None, dbg_rgb
 
-    xL, xR = left[0], right[0]
-    yT, yB = top[0], bottom[0]
+    # Sanity checks
+    if x2 - x1 < int(w * 0.45) or y2 - y1 < int(h * 0.45):
+        dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
+        return None, dbg_rgb
 
-    # sanity checks
-    if xR - xL < int(w * 0.40) or yB - yT < int(h * 0.40):
-        debug_rgb = cv2.cvtColor(debug, cv2.COLOR_BGR2RGB)
-        return None, debug_rgb
-
-    rect = (xL, yT, xR, yB)
-
-    # draw the chosen rectangle in yellow
-    cv2.rectangle(debug, (xL, yT), (xR, yB), (0, 255, 255), 3)
-    debug_rgb = cv2.cvtColor(debug, cv2.COLOR_BGR2RGB)
-    return rect, debug_rgb
+    # Draw boundary lines (yellow)
+    cv2.rectangle(dbg, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 255), 3)
+    dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
+    return (int(x1), int(y1), int(x2), int(y2)), dbg_rgb
 
 
 # -----------------------------
@@ -281,8 +301,8 @@ def analyze(img_pil: Image.Image):
 
     if inner is None:
         return (
-            "Insufficient evidence: could not reliably detect INNER printed frame.\n"
-            "Debug image shows detected lines (green=vertical, blue=horizontal).\n",
+            "Insufficient evidence: could not reliably detect INNER printed frame boundary.\n"
+            "Debug image shows detected edges + the attempted boundary box (if any).",
             Image.fromarray(dbg),
         )
 

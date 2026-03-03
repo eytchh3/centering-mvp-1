@@ -9,8 +9,11 @@ from PIL import Image
 PSA_LIMIT = 0.55
 CLEAR_PASS_MAX = 0.54
 BORDERLINE_HIGH = 0.56
-INNER_ASPECT_SCALE = 1.035
-INNER_PAD_FRAC = 0.0025
+
+# Inner-box geometry tweaks
+INNER_HEIGHT_SCALE = 1.00   # 1.00 = exact outer aspect; bump slightly if Optic inner is taller
+INNER_PAD_FRAC = 0.002      # small inset to avoid halo/glow edges
+
 
 # -----------------------------
 # Geometry helpers
@@ -73,7 +76,6 @@ def _score_candidate_quad(pts: np.ndarray, area: float, H: int, W: int) -> float
     margin = min(minx, miny, (W - 1) - maxx, (H - 1) - maxy)
     margin_norm = margin / float(min(H, W))
 
-    # Reject if it hugs screenshot edges
     if margin_norm < 0.01:
         return -1.0
 
@@ -150,7 +152,7 @@ def find_outer_card_quad(img_bgr: np.ndarray):
 
 
 # -----------------------------
-# INNER boundary detection (Sobel energy + geometry)
+# INNER boundary: reliable L/R → fit height → vertical center
 # -----------------------------
 def _smooth1d(a: np.ndarray, k: int) -> np.ndarray:
     k = max(9, k | 1)
@@ -158,115 +160,87 @@ def _smooth1d(a: np.ndarray, k: int) -> np.ndarray:
     return np.convolve(a.astype(np.float32), ker, mode="same")
 
 
-def find_inner_boundary_rect(warped_bgr: np.ndarray):
+def find_inner_by_lr_fit(warped_bgr: np.ndarray):
     """
     Returns:
-      rect: (x1,y1,x2,y2) candidate
+      rect (x1,y1,x2,y2) or None
       confident: bool
-      overlay_rgb: debug overlay on the WARPED image (not edge map)
+      overlay_rgb: overlay drawn on warped image (thin hashmarks)
     """
     h, w = warped_bgr.shape[:2]
     overlay = warped_bgr.copy()
 
     gray = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2GRAY)
 
-    # Contrast normalize a bit (helps on holo glare)
+    # CLAHE helps holo/glare
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     g = clahe.apply(gray)
     g = cv2.GaussianBlur(g, (3, 3), 0)
 
-    # Sobel energy: strong, less speckly than Canny for “where are the rails”
+    # Sobel vertical energy for rails
     sx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
-    sy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
     sx = np.abs(sx)
-    sy = np.abs(sy)
 
-    # Bands
-    yA, yB = int(h * 0.18), int(h * 0.78)   # mid-band for L/R
-    xC1, xC2 = int(w * 0.25), int(w * 0.75) # central strip for T/B
-
-    # L/R profile from vertical energy
+    yA, yB = int(h * 0.18), int(h * 0.78)  # avoid top logo + bottom nameplate
     col_energy = sx[yA:yB, :].mean(axis=0)
     col_energy = _smooth1d(col_energy, k=max(31, w // 45))
 
-    # T profile from horizontal energy
-    row_energy = sy[:, xC1:xC2].mean(axis=1)
-    row_energy = _smooth1d(row_energy, k=max(31, h // 45))
-
-    # Search windows near edges
+    # Search L/R within 2–14% of width
     x_lo, x_hi = int(w * 0.02), int(w * 0.14)
-    y_lo, y_hi = int(h * 0.02), int(h * 0.14)
-
-    # L/R peaks in the edge bands
     winL = col_energy[x_lo:x_hi]
-    winR = col_energy[w - x_hi:w - x_lo]  # not reversed yet
+    winR = col_energy[w - x_hi:w - x_lo]
+
     if winL.size < 10 or winR.size < 10:
         return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
     x1 = x_lo + int(np.argmax(winL))
     x2 = (w - x_lo) - int(np.argmax(winR[::-1]))
 
-    # Top peak
-    winT = row_energy[y_lo:y_hi]
-    if winT.size < 10:
-        return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
-
-    y1 = y_lo + int(np.argmax(winT))
-
-    # Geometry bottom
     if x2 <= x1 + int(w * 0.30):
         return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
-    outer_aspect = h / float(w)
     inner_w = float(x2 - x1)
-    expected_h = float(np.clip(inner_w * outer_aspect * INNER_ASPECT_SCALE, h * 0.55, h * 0.92))
-    y2 = int(y1 + expected_h)
 
-    # Clamp away from extreme bottom zone
-    if y2 > int(h * 0.90):
-        y2 = int(h * 0.90)
+    # Compute height from OUTER aspect (height/width) and optional scale
+    outer_aspect = h / float(w)
+    inner_h = inner_w * outer_aspect * INNER_HEIGHT_SCALE
+
+    # Vertical center fit
+    y_center = h / 2.0
+    y1 = int(y_center - inner_h / 2.0)
+    y2 = int(y_center + inner_h / 2.0)
+
+    # Clamp to safe region: don’t let it reach extreme top/bottom
+    y1 = max(int(h * 0.03), y1)
+    y2 = min(int(h * 0.97), y2)
 
     if y2 <= y1 + int(h * 0.35):
         return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
-    # Validate bottom line exists: check horizontal energy around y2 across inner width
-    band = 3
-    yb0 = max(0, y2 - band)
-    yb1 = min(h, y2 + band + 1)
-    xb0 = int(x1 + inner_w * 0.10)
-    xb1 = int(x2 - inner_w * 0.10)
-    xb0 = max(0, xb0)
-    xb1 = min(w, xb1)
-
-    confident = True
-    if xb1 - xb0 < 40:
-        confident = False
-    else:
-        bottom_strength = sy[yb0:yb1, xb0:xb1].mean()
-        top_strength = sy[max(0, y1 - band):min(h, y1 + band + 1), xb0:xb1].mean()
-
-        # Much looser validation than before (prevents “UNCERTAIN spam”)
-        # If bottom is tiny vs top, treat as uncertain.
-        if bottom_strength < max(6.0, 0.25 * top_strength):
-            confident = False
-
-    # Inset pad (avoid halo)
+    # Small inset pad to avoid halo/glow edges
     pad = int(min(h, w) * INNER_PAD_FRAC)
     x1p = int(x1 + pad)
-    y1p = int(y1 + pad)
     x2p = int(x2 - pad)
+    y1p = int(y1 + pad)
     y2p = int(y2 - pad)
 
     if x2p <= x1p or y2p <= y1p:
         return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
-    # Draw candidate inner box:
-    # - Blue if confident
-    # - Orange if uncertain (still show what it tried)
-    color = (255, 0, 0) if confident else (0, 165, 255)  # BGR
-    cv2.rectangle(overlay, (x1p, y1p), (x2p, y2p), color, 2)
+    # Confidence: rails should be noticeably stronger than nearby columns
+    # (simple check to avoid crazy picks)
+    band = int(max(3, w * 0.01))
+    left_strength = col_energy[max(0, x1 - band):min(w, x1 + band)].mean()
+    right_strength = col_energy[max(0, x2 - band):min(w, x2 + band)].mean()
+    mid_strength = col_energy[int(w * 0.45):int(w * 0.55)].mean()
+    confident = (left_strength > 1.10 * mid_strength) and (right_strength > 1.10 * mid_strength)
 
-    # Also draw rails we found (thin)
+    # Draw:
+    # Green outer handled elsewhere; draw inner as blue if confident, orange if not
+    color = (255, 0, 0) if confident else (0, 165, 255)
+
+    # thin hashmarks/lines
+    cv2.rectangle(overlay, (x1p, y1p), (x2p, y2p), color, 2)
     cv2.line(overlay, (x1p, 0), (x1p, h - 1), color, 1)
     cv2.line(overlay, (x2p, 0), (x2p, h - 1), color, 1)
     cv2.line(overlay, (0, y1p), (w - 1, y1p), color, 1)
@@ -340,42 +314,33 @@ def analyze(img_pil: Image.Image):
         quad, edge_map = find_outer_card_quad(img_bgr)
         if quad is None:
             edge_rgb = cv2.cvtColor(edge_map, cv2.COLOR_GRAY2RGB)
-            return (
-                "Insufficient photo quality: could not detect OUTER card outline.",
-                Image.fromarray(edge_rgb),
-            )
+            return "Insufficient photo quality: could not detect OUTER card outline.", Image.fromarray(edge_rgb)
 
         warped = warp_card(img_bgr, quad)
         if warped is None:
             edge_rgb = cv2.cvtColor(edge_map, cv2.COLOR_GRAY2RGB)
-            return (
-                "Insufficient photo quality: outline detected but warp failed.",
-                Image.fromarray(edge_rgb),
-            )
+            return "Insufficient photo quality: outline detected but warp failed.", Image.fromarray(edge_rgb)
 
         h, w = warped.shape[:2]
+
+        # Start overlay with outer box
         overlay = warped.copy()
-        cv2.rectangle(overlay, (0, 0), (w - 1, h - 1), (0, 255, 0), 2)  # outer green
+        cv2.rectangle(overlay, (0, 0), (w - 1, h - 1), (0, 255, 0), 2)
 
-        inner, confident, inner_overlay_rgb = find_inner_boundary_rect(warped)
-
-        # If inner function returns a full overlay already, use it (it draws candidate box)
-        overlay_rgb = inner_overlay_rgb
+        inner, confident, overlay_rgb = find_inner_by_lr_fit(warped)
 
         if inner is None:
-            msg = (
-                "UNCERTAIN: could not detect INNER boundary.\n"
-                "Try a straighter, less-glare photo if possible."
-            )
+            msg = "UNCERTAIN: could not detect inner L/R rails reliably."
+            overlay_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
             return msg, Image.fromarray(overlay_rgb)
 
+        # overlay_rgb already includes the inner box drawing
         x1, y1, x2, y2 = inner
 
         if not confident:
             msg = (
-                "UNCERTAIN: inner boundary is not reliable in this photo.\n"
-                "Orange box = what it *thinks* the inner boundary might be.\n"
-                "Do NOT trust centering from this result."
+                "UNCERTAIN: inner boundary may be unreliable.\n"
+                "Orange = candidate; do not trust centering."
             )
             return msg, Image.fromarray(overlay_rgb)
 
@@ -383,10 +348,6 @@ def analyze(img_pil: Image.Image):
         gR = int(w - x2)
         gT = int(y1)
         gB = int(h - y2)
-
-        if min(gL, gR, gT, gB) < 5:
-            msg = "UNCERTAIN: detected boundary but gaps are too small/unclear."
-            return msg, Image.fromarray(overlay_rgb)
 
         lr, tb, worst, within_55, bucket = classify_centering(gL, gR, gT, gB)
         lr_split = (round(gL / (gL + gR) * 100, 1), round(gR / (gL + gR) * 100, 1))
@@ -403,8 +364,7 @@ def analyze(img_pil: Image.Image):
             f"Corners (photo-based risk): {corners}\n\n"
             "Trust check:\n"
             "- Green box = outer card bounds after flatten.\n"
-            "- Blue box = confident inner boundary.\n"
-            "- Orange box = uncertain inner boundary (do not trust)."
+            "- Blue box = inner boundary (LR-fit + centered height).\n"
         )
 
         return msg, Image.fromarray(overlay_rgb)
@@ -424,7 +384,7 @@ demo = gr.Interface(
         gr.Image(type="pil", label="Overlay / Debug (what was measured)"),
     ],
     title="Card Pre-Grade (Front Only) — Centering 55/45 + Corner Risk",
-    description="Uploads a front image, flattens perspective, detects outer card + inner boundary, measures 55/45, flags corner risk. If detection is uncertain, it will say so.",
+    description="Uses robust outer flattening + inner L/R rail detection, then fits an inner box by geometry and vertical centering.",
 )
 
 if __name__ == "__main__":

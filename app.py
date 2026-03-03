@@ -280,11 +280,11 @@ def analyze(img_pil: Image.Image):
     overlay = warped.copy()
 
     if inner is None:
-    return (
-        "Insufficient evidence: could not reliably detect INNER printed frame.\n"
-        "Debug image shows detected lines (green=vertical, blue=horizontal).\n",
-        Image.fromarray(dbg),
-    )
+        return (
+            "Insufficient evidence: could not reliably detect INNER printed frame.\n"
+            "Debug image shows detected lines (green=vertical, blue=horizontal).\n",
+            Image.fromarray(dbg),
+        )
 
     # Gaps from OUTER card edge to INNER frame
     gL = int(x1)

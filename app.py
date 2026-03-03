@@ -248,16 +248,16 @@ y1, y2, sT, sB = best
 confident = (sT > 6.0) and (sB > 6.0)
 
     # Apply small inset pad
-    pad = int(min(h, w) * INNER_PAD_FRAC)
-    x1p = int(x1 + pad)
-    x2p = int(x2 - pad)
-    y1p = int(y1 + pad)
-    y2p = int(y2 - pad)
+pad = int(min(h, w) * INNER_PAD_FRAC)
+x1p = int(x1 + pad)
+x2p = int(x2 - pad)
+y1p = int(y1 + pad)
+y2p = int(y2 - pad)
 
-    if x2p <= x1p or y2p <= y1p:
-        return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+if x2p <= x1p or y2p <= y1p:
+    return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
-    color = (255, 0, 0) if confident else (0, 165, 255)
+color = (255, 0, 0) if confident else (0, 165, 255)
 
     # thin box + hash lines
     cv2.rectangle(overlay, (x1p, y1p), (x2p, y2p), color, 2)

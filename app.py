@@ -153,7 +153,20 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
     # For top/bottom boundary, use a central vertical strip to avoid nameplate/logo edges
     xC1, xC2 = int(w * 0.25), int(w * 0.75)
     # Ignore the nameplate region for top/bottom detection
-    y_cut = int(h * 0.80)  # everything below this tends to be nameplate/labels/stand noise
+    # Detect nameplate start dynamically (look for the strongest horizontal edge band near the bottom)
+    xC1, xC2 = int(w * 0.25), int(w * 0.75)
+
+    row_full = edges[:, xC1:xC2].sum(axis=1) / 255.0
+    row_full_s = smooth1d(row_full, k=max(25, h // 80))
+
+    # Search for a strong band in the bottom 35% of the card
+    search_start = int(h * 0.60)
+    band = row_full_s[search_start:]
+
+    # pick the peak (nameplate/top edge) and cut a bit above it
+    peak_idx = int(np.argmax(band)) + search_start
+    y_cut = max(int(h * 0.65), peak_idx - int(h * 0.03))  # cut ~3% above the peak, but not too high
+
     row = edges[:y_cut, xC1:xC2].sum(axis=1) / 255.0
 
     col_s = smooth1d(col, k=max(25, w // 60))

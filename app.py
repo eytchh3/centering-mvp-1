@@ -145,9 +145,13 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
         kernel = np.ones(k, dtype=np.float32) / k
         return np.convolve(ap, kernel, mode="valid")
 
-    # Compute edge density profiles
-    col = edges.sum(axis=0) / 255.0  # edge pixels per column
-    row = edges.sum(axis=1) / 255.0  # edge pixels per row
+    # Use mid-band ROI to avoid logos/nameplate influencing frame detection
+    yA, yB = int(h * 0.18), int(h * 0.78)
+    xA, xB = int(w * 0.10), int(w * 0.90)
+
+    col = edges[yA:yB, :].sum(axis=0) / 255.0
+    row = edges[:, xA:xB].sum(axis=1) / 255.0
+
     col_s = smooth1d(col, k=max(25, w // 60))
     row_s = smooth1d(row, k=max(25, h // 60))
 

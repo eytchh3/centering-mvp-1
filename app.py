@@ -4,11 +4,11 @@ import numpy as np
 from PIL import Image
 
 # -----------------------------
-# Config (tuned for your goals)
+# Config
 # -----------------------------
-PSA_LIMIT = 0.55          # 55/45 rule (front)
-CLEAR_PASS_MAX = 0.54     # "centering eliminated" bucket (comfortable pass)
-BORDERLINE_HIGH = 0.56    # above this = clear fail zone for noisy photos
+PSA_LIMIT = 0.55          # PSA 10 centering eligibility (front)
+CLEAR_PASS_MAX = 0.54     # comfortable pass bucket
+BORDERLINE_HIGH = 0.56    # borderline bucket upper bound
 
 
 # -----------------------------
@@ -42,7 +42,10 @@ def warp_card(img_bgr: np.ndarray, quad: np.ndarray, out_w: int = 900):
     if maxW < 50 or maxH < 50:
         return None, None
 
-    dst = np.array([[0, 0], [maxW - 1, 0], [maxW - 1, maxH - 1], [0, maxH - 1]], dtype="float32")
+    dst = np.array(
+        [[0, 0], [maxW - 1, 0], [maxW - 1, maxH - 1], [0, maxH - 1]],
+        dtype="float32",
+    )
     M = cv2.getPerspectiveTransform(rect, dst)
     warped = cv2.warpPerspective(img_bgr, M, (maxW, maxH))
 
@@ -55,9 +58,15 @@ def warp_card(img_bgr: np.ndarray, quad: np.ndarray, out_w: int = 900):
 
 # -----------------------------
 # Detection: OUTER card quad
-# (scanner-like, robust)
 # -----------------------------
 def find_outer_card_quad(img_bgr: np.ndarray):
+    """
+    Outer outline detection:
+    - edge map
+    - mask bottom region to avoid stands
+    - try top contours, prefer those that approximate to 4 points and match card aspect
+    Returns: (quad_points or None, edge_map)
+    """
     H, W = img_bgr.shape[:2]
 
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -67,7 +76,7 @@ def find_outer_card_quad(img_bgr: np.ndarray):
     edges = cv2.dilate(edges, None, iterations=2)
     edges = cv2.erode(edges, None, iterations=1)
 
-    # Mask bottom stand region (keeps coordinates correct, avoids cropping)
+    # Mask bottom (stand/background clutter) without changing coordinates
     cut = int(H * 0.78)
     edges[cut:, :] = 0
 
@@ -75,69 +84,62 @@ def find_outer_card_quad(img_bgr: np.ndarray):
     if not cnts:
         return None, edges
 
-    target = 2.5 / 3.5  # ~0.714
+    target = 2.5 / 3.5  # ~0.714 (w/h)
     lo, hi = 0.62, 0.80
 
-    best_quad = None
-    best_score = -1
+    best = None
+    best_score = -1.0
 
-    for c in sorted(cnts, key=cv2.contourArea, reverse=True)[:30]:
+    for c in sorted(cnts, key=cv2.contourArea, reverse=True)[:40]:
         area = cv2.contourArea(c)
         if area < 0.03 * (H * W):
             continue
 
         peri = cv2.arcLength(c, True)
 
-        # Try to get TRUE corners first
+        # Try true quad first
         approx = cv2.approxPolyDP(c, 0.02 * peri, True)
         if len(approx) == 4:
             pts = approx.reshape(4, 2).astype("float32")
+            quad_bonus = 1.15
         else:
-            # Fallback: rotated rectangle
             rect = cv2.minAreaRect(c)
             pts = cv2.boxPoints(rect).astype("float32")
+            quad_bonus = 1.0
 
         rect_o = order_points(pts)
         (tl, tr, br, bl) = rect_o
-        wA = np.linalg.norm(br - bl)
-        wB = np.linalg.norm(tr - tl)
-        hA = np.linalg.norm(tr - br)
-        hB = np.linalg.norm(tl - bl)
-        ww = max(wA, wB)
-        hh = max(hA, hB)
+        ww = max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl))
+        hh = max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl))
         if ww < 50 or hh < 50:
             continue
 
-        aspect = min(ww, hh) / max(ww, hh)  # should be ~0.714
+        aspect = min(ww, hh) / max(ww, hh)
         if not (lo <= aspect <= hi):
             continue
 
-        score = area * (1.0 - abs(aspect - target))
+        score = area * (1.0 - abs(aspect - target)) * quad_bonus
         if score > best_score:
             best_score = score
-            best_quad = pts
+            best = pts
 
-    return best_quad, edges
+    return best, edges
 
 
 # -----------------------------
-# Detection: INNER printed frame
-# (improved heuristic)
+# Detection: INNER "frame boundary" via scan-in
 # -----------------------------
 def find_inner_frame_rect(warped_bgr: np.ndarray):
     """
-    Detect inner frame by scanning inward from each edge for a strong change in edge density.
-    Works better on Optic-style designs where the 'frame' isn't a crisp rectangle.
-    Returns: (rect, debug_rgb)
-      rect = (x1,y1,x2,y2) or None
+    Detect inner boundary by scanning in from each edge using edge-density profiles.
+    Returns: (rect or None, debug_rgb)
+      rect = (x1,y1,x2,y2) in warped coords
     """
     h, w = warped_bgr.shape[:2]
     gray = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2GRAY)
 
-    # Edge map of the flattened card
     edges = cv2.Canny(gray, 60, 160)
 
-    # Smooth edge counts to reduce noise from text/player
     def smooth1d(a, k=25):
         k = max(5, k | 1)  # odd
         pad = k // 2
@@ -145,123 +147,101 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
         kernel = np.ones(k, dtype=np.float32) / k
         return np.convolve(ap, kernel, mode="valid")
 
-    # Use mid-band ROI to avoid logos/nameplate influencing frame detection
+    # ---- Profiles ----
+    # L/R: use mid-height band to avoid logos/nameplate
     yA, yB = int(h * 0.18), int(h * 0.78)
-    xA, xB = int(w * 0.10), int(w * 0.90)
-
     col = edges[yA:yB, :].sum(axis=0) / 255.0
-    # For top/bottom boundary, use a central vertical strip to avoid nameplate/logo edges
-    xC1, xC2 = int(w * 0.25), int(w * 0.75)
-    # Ignore the nameplate region for top/bottom detection
-    # Detect nameplate start dynamically (look for the strongest horizontal edge band near the bottom)
-    xC1, xC2 = int(w * 0.25), int(w * 0.75)
 
+    # T/B: use central vertical strip; also compute full profile to find nameplate band peak
+    xC1, xC2 = int(w * 0.25), int(w * 0.75)
     row_full = edges[:, xC1:xC2].sum(axis=1) / 255.0
     row_full_s = smooth1d(row_full, k=max(25, h // 80))
 
-    # Search for a strong band in the bottom 35% of the card
-    search_start = int(h * 0.60)
+    # Dynamic y_cut: find strongest band in lower region (often nameplate edge) and cut above it
+    search_start = int(h * 0.55)
     band = row_full_s[search_start:]
-
-    # pick the peak (nameplate/top edge) and cut a bit above it
     peak_idx = int(np.argmax(band)) + search_start
-    y_cut = max(int(h * 0.65), peak_idx - int(h * 0.03))  # cut ~3% above the peak, but not too high
+    # Cut above the peak, but keep enough bottom content
+    y_cut = max(int(h * 0.70), peak_idx - int(h * 0.06))
+    y_cut = int(np.clip(y_cut, int(h * 0.65), int(h * 0.90)))
 
     row = edges[:y_cut, xC1:xC2].sum(axis=1) / 255.0
 
     col_s = smooth1d(col, k=max(25, w // 60))
     row_s = smooth1d(row, k=max(25, h // 60))
 
-    # Optic-style cards: frame boundary is usually close to the edge
+    # Search bands near edges (tightened for Optic-style borders)
     x_lo, x_hi = int(w * 0.02), int(w * 0.14)
     y_lo, y_hi = int(h * 0.02), int(h * 0.14)
 
-    # Find "knee" where edge density jumps (border -> interior)
-    def find_boundary_from_left(profile, lo, hi):
-        window = profile[lo:hi]
+    def first_or_grad(window, lo_offset, reverse_map=None):
+        """
+        window: 1D array in search band (already sliced).
+        lo_offset: index offset to convert window index -> absolute index in that dimension.
+        reverse_map: optional callable that maps window-index to absolute index (for right/bottom scanning).
+        """
         if window.size < 10:
             return None
-        base = np.median(window[: max(5, window.size // 5)])
-        # boundary = first index where we exceed base by a threshold
-        thr = max(base * 1.8, base + 20)
-        for i, v in enumerate(window):
-            if v >= thr:
-                return lo + i
-        # fallback: max gradient point
-        grad = np.abs(np.diff(window))
-        if grad.size == 0:
-            return None
-        return lo + int(np.argmax(grad))
 
-    def find_boundary_from_right(profile, lo, hi):
-        # profile is full length; we mirror the right-side window
-        window = profile[w - hi : w - lo][::-1]
-        if window.size < 10:
-            return None
-        base = np.median(window[: max(5, window.size // 5)])
-        thr = max(base * 1.8, base + 20)
-        for i, v in enumerate(window):
-            if v >= thr:
-                return (w - lo) - i
-        grad = np.abs(np.diff(window))
-        if grad.size == 0:
-            return None
-        return (w - lo) - int(np.argmax(grad))
-
-    def find_boundary_from_top(profile, lo, hi):
-        window = profile[lo:hi]
-        if window.size < 10:
-            return None
-        base = np.median(window[: max(5, window.size // 5)])
-        thr = max(base * 1.8, base + 20)
-
-        # First-hit (preferred)
-        for i, v in enumerate(window):
-            if v >= thr:
-                return lo + i
-
-        # Fallback: strongest gradient within the band (still near edge)
-        grad = np.abs(np.diff(window))
-        if grad.size == 0:
-            return None
-        return lo + int(np.argmax(grad))
-
-    def find_boundary_from_bottom(profile, lo, hi):
-        row_h = len(profile)
-        window = profile[row_h - hi : row_h - lo][::-1]
-        if window.size < 10:
-            return None
         base = np.median(window[: max(5, window.size // 5)])
         thr = max(base * 1.8, base + 20)
 
         for i, v in enumerate(window):
             if v >= thr:
-                return (row_h - lo) - i
+                idx = i
+                return reverse_map(idx) if reverse_map else (lo_offset + idx)
 
         grad = np.abs(np.diff(window))
         if grad.size == 0:
             return None
-        return (row_h - lo) - int(np.argmax(grad))
+        idx = int(np.argmax(grad))
+        return reverse_map(idx) if reverse_map else (lo_offset + idx)
 
-    x1 = find_boundary_from_left(col_s, x_lo, x_hi)
-    x2 = find_boundary_from_right(col_s, x_lo, x_hi)
-    y1 = find_boundary_from_top(row_s, y_lo, y_hi)
-    y2 = find_boundary_from_bottom(row_s, y_lo, y_hi)
+    # Left
+    winL = col_s[x_lo:x_hi]
+    x1 = first_or_grad(winL, x_lo)
 
-    # Debug image: show edges + chosen boundaries
+    # Right (mirror the band)
+    winR = col_s[w - x_hi : w - x_lo][::-1]
+    x2 = first_or_grad(
+        winR,
+        0,
+        reverse_map=lambda idx: (w - x_lo) - idx
+    )
+
+    # Top
+    winT = row_s[y_lo:y_hi]
+    y1 = first_or_grad(winT, y_lo)
+
+    # Bottom: row_s is length y_cut (not full h)
+    row_h = len(row_s)
+    winB = row_s[row_h - y_hi : row_h - y_lo][::-1]
+    y2_local = first_or_grad(
+        winB,
+        0,
+        reverse_map=lambda idx: (row_h - y_lo) - idx
+    )
+    y2 = y2_local  # in the row_s coordinate space (0..y_cut)
+
+    # Debug image
     dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+
+    # draw y_cut line so we can see where bottom was excluded
+    cv2.line(dbg, (0, int(y_cut)), (w - 1, int(y_cut)), (255, 255, 0), 2)  # cyan
 
     if None in (x1, x2, y1, y2):
         dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
         return None, dbg_rgb
 
-    # Sanity checks
-    if x2 - x1 < int(w * 0.45) or y2 - y1 < int(h * 0.45):
+    # sanity check on size (use y_cut for bottom since y2 is inside 0..y_cut)
+    if (x2 - x1) < int(w * 0.45) or (y2 - y1) < int(h * 0.45):
         dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
         return None, dbg_rgb
 
-    # NEW: prevent bottom snapping into nameplate region
-    if (h - y2) > int(h * 0.20):
+    # extra guardrail: bottom boundary should not be absurdly far from edge
+    # (if it is, it's likely nameplate/artwork edge)
+    bottom_gap = h - y2
+    if bottom_gap > int(h * 0.22):
         dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
         return None, dbg_rgb
 
@@ -273,7 +253,7 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
         dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
         return None, dbg_rgb
 
-    # Draw boundary lines (yellow)
+    # draw chosen rect (yellow)
     cv2.rectangle(dbg, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 255), 3)
     dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
     return (int(x1), int(y1), int(x2), int(y2)), dbg_rgb
@@ -303,10 +283,7 @@ def classify_centering(gL: int, gR: int, gT: int, gB: int):
 # Corners (photo-based risk flag)
 # -----------------------------
 def corner_risk(warped_bgr: np.ndarray):
-    """
-    Corner "risk" heuristic using sharpness in corner ROIs.
-    This is NOT microscopic grading—just a photo-based flag.
-    """
+    """Photo-based corner risk flag (not microscopic grading)."""
     h, w = warped_bgr.shape[:2]
     s = int(min(h, w) * 0.10)
 
@@ -341,94 +318,89 @@ def corner_risk(warped_bgr: np.ndarray):
 # Main analysis function
 # -----------------------------
 def analyze(img_pil: Image.Image):
-    img_rgb = np.array(img_pil.convert("RGB"))
-    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    try:
+        img_rgb = np.array(img_pil.convert("RGB"))
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
-    quad, edge_map = find_outer_card_quad(img_bgr)
+        quad, edge_map = find_outer_card_quad(img_bgr)
 
-    # If we fail outer detection, return edge-map for debugging
-    if quad is None:
-        edge_rgb = cv2.cvtColor(edge_map, cv2.COLOR_GRAY2RGB)
-        return (
-            "Insufficient photo quality: could not detect the full OUTER card outline.\n"
-            "- Make sure all 4 card corners are visible (not cropped).\n"
-            "- Reduce glare; keep the card taking up more of the frame.\n"
-            "- Avoid heavy tilt.\n",
-            Image.fromarray(edge_rgb),
+        if quad is None:
+            edge_rgb = cv2.cvtColor(edge_map, cv2.COLOR_GRAY2RGB)
+            return (
+                "Insufficient photo quality: could not detect the full OUTER card outline.\n"
+                "- Make sure all 4 card corners are visible.\n"
+                "- Reduce glare; keep the card taking up more of the frame.\n"
+                "- Avoid heavy tilt.\n",
+                Image.fromarray(edge_rgb),
+            )
+
+        warped, _ = warp_card(img_bgr, quad)
+        if warped is None:
+            edge_rgb = cv2.cvtColor(edge_map, cv2.COLOR_GRAY2RGB)
+            return (
+                "Insufficient photo quality: detected outline but could not warp reliably.",
+                Image.fromarray(edge_rgb),
+            )
+
+        inner, dbg = find_inner_frame_rect(warped)
+
+        overlay = warped.copy()
+        h, w = warped.shape[:2]
+        cv2.rectangle(overlay, (0, 0), (w - 1, h - 1), (0, 255, 0), 2)
+
+        if inner is None:
+            # return the debug image produced by the inner detector
+            return (
+                "UNCERTAIN: could not reliably detect INNER frame boundary.\n"
+                "Overlay shows outer warp; debug image shows edge map + cyan y_cut line + (if found) yellow inner box.",
+                Image.fromarray(dbg),
+            )
+
+        x1, y1, x2, y2 = inner
+        gL = int(x1)
+        gR = int(w - x2)
+        gT = int(y1)
+        gB = int(h - y2)
+
+        # sanity
+        if min(gL, gR, gT, gB) < 5:
+            overlay_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+            return (
+                "UNCERTAIN: detected inner boundary but measurement is unreliable (frame too close/unclear).",
+                Image.fromarray(overlay_rgb),
+            )
+
+        lr, tb, worst, within_55, bucket = classify_centering(gL, gR, gT, gB)
+
+        lr_split = (round(gL / (gL + gR) * 100, 1), round(gR / (gL + gR) * 100, 1))
+        tb_split = (round(gT / (gT + gB) * 100, 1), round(gB / (gT + gB) * 100, 1))
+
+        corners = corner_risk(warped)
+
+        # draw inner on overlay (blue)
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        cv2.putText(overlay, bucket, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+
+        msg = (
+            "Centering (outer edge → inner boundary):\n"
+            f"- L/R split: {lr_split[0]} / {lr_split[1]}   (max-side={lr:.3f})\n"
+            f"- T/B split: {tb_split[0]} / {tb_split[1]}   (max-side={tb:.3f})\n"
+            f"- Within 55/45: {'YES' if within_55 else 'NO'}\n"
+            f"- Bucket: {bucket}\n\n"
+            f"Corners (photo-based risk): {corners}\n\n"
+            "Trust check:\n"
+            "- Green box = outer card bounds after flatten.\n"
+            "- Blue box = detected inner boundary.\n"
+            "- If blue box is wrong, treat as UNCERTAIN and request a better straight-on photo."
         )
 
-    warped, _ = warp_card(img_bgr, quad)
-    if warped is None:
-        edge_rgb = cv2.cvtColor(edge_map, cv2.COLOR_GRAY2RGB)
-        return (
-            "Insufficient photo quality: detected outline but could not warp reliably.",
-            Image.fromarray(edge_rgb),
-        )
-
-    inner, dbg = find_inner_frame_rect(warped)
-
-    x1, y1, x2, y2 = inner  # <-- ADD THIS
-
-    h, w = warped.shape[:2]
-
-    gL = int(x1)
-    gR = int(w - x2)
-    gT = int(y1)
-    gB = int(h - y2)
-
-    overlay = warped.copy()
-
-    if inner is None:
-        return (
-            "Insufficient evidence: could not reliably detect INNER printed frame boundary.\n"
-            "Debug image shows detected edges + the attempted boundary box (if any).",
-            Image.fromarray(dbg),
-        )
-
-    # Gaps from OUTER card edge to INNER frame
-    gL = int(x1)
-    gR = int(w - x2)
-    gT = int(y1)
-    gB = int(h - y2)
-
-    # sanity checks
-    if min(gL, gR, gT, gB) < 5:
-        cv2.putText(overlay, "FRAME TOO CLOSE/UNCLEAR", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
         overlay_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
-        return (
-            "Insufficient evidence: detected frame but measurement is unreliable (frame too close/unclear).",
-            Image.fromarray(overlay_rgb),
-        )
+        return msg, Image.fromarray(overlay_rgb)
 
-    lr, tb, worst, within_55, bucket = classify_centering(gL, gR, gT, gB)
-
-    lr_split = (round(gL / (gL + gR) * 100, 1), round(gR / (gL + gR) * 100, 1))
-    tb_split = (round(gT / (gT + gB) * 100, 1), round(gB / (gT + gB) * 100, 1))
-
-    corners = corner_risk(warped)
-
-    # Overlay: outer boundary is the warped image bounds; draw inner frame
-    cv2.rectangle(overlay, (0, 0), (w - 1, h - 1), (0, 255, 0), 2)          # outer
-    cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 0, 0), 2)              # inner frame
-    cv2.putText(overlay, bucket, (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
-
-    msg = (
-        "Centering (outer edge → inner frame):\n"
-        f"- L/R split: {lr_split[0]} / {lr_split[1]}   (max-side={lr:.3f})\n"
-        f"- T/B split: {tb_split[0]} / {tb_split[1]}   (max-side={tb:.3f})\n"
-        f"- Within 55/45: {'YES' if within_55 else 'NO'}\n"
-        f"- Bucket: {bucket}\n\n"
-        f"Corners (photo-based risk): {corners}\n\n"
-        "Trust check:\n"
-        "- Green box = outer card bounds after flatten.\n"
-        "- Blue box = detected inner frame.\n"
-        "- If blue box is wrong, treat as UNCERTAIN and request a better straight-on photo."
-    )
-
-    overlay_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
-    return msg, Image.fromarray(overlay_rgb)
+    except Exception as e:
+        # Always return 2 outputs so Gradio doesn't throw "Error" tiles
+        return f"Error: {type(e).__name__}: {e}", Image.new("RGB", (10, 10), (0, 0, 0))
 
 
 # -----------------------------
@@ -439,10 +411,10 @@ demo = gr.Interface(
     inputs=gr.Image(type="pil", label="Upload FRONT screenshot/photo"),
     outputs=[
         gr.Textbox(label="Result"),
-        gr.Image(type="pil", label="Overlay / Debug (what was measured)"),
+        gr.Image(type="pil", label="Overlay / Debug"),
     ],
     title="Card Pre-Grade (Front Only) — Centering 55/45 + Corner Risk",
-    description="Uploads a front image, flattens perspective, detects outer card + inner printed frame, measures 55/45, flags corner risk. If detection is uncertain, it will say so.",
+    description="Uploads a front image, flattens perspective, detects outer card + inner boundary, measures 55/45, flags corner risk. If detection is uncertain, it will say so.",
 )
 
 if __name__ == "__main__":

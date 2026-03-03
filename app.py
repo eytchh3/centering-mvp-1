@@ -194,32 +194,26 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
         return (w - lo) - int(np.argmax(grad))
 
     def find_boundary_from_top(profile, lo, hi):
-        window = profile[lo:hi]
-        if window.size < 10:
-            return None
-        base = np.median(window[: max(5, window.size // 5)])
-        thr = max(base * 1.8, base + 20)
-        for i, v in enumerate(window):
-            if v >= thr:
-                return lo + i
-        grad = np.abs(np.diff(window))
-        if grad.size == 0:
-            return None
-        return lo + int(np.argmax(grad))
+    window = profile[lo:hi]
+    if window.size < 10:
+        return None
+    base = np.median(window[: max(5, window.size // 5)])
+    thr = max(base * 1.8, base + 20)
+    for i, v in enumerate(window):
+        if v >= thr:
+            return lo + i
+    return None
 
     def find_boundary_from_bottom(profile, lo, hi):
-        window = profile[h - hi : h - lo][::-1]
-        if window.size < 10:
-            return None
-        base = np.median(window[: max(5, window.size // 5)])
-        thr = max(base * 1.8, base + 20)
-        for i, v in enumerate(window):
-            if v >= thr:
-                return (h - lo) - i
-        grad = np.abs(np.diff(window))
-        if grad.size == 0:
-            return None
-        return (h - lo) - int(np.argmax(grad))
+    window = profile[h - hi : h - lo][::-1]
+    if window.size < 10:
+        return None
+    base = np.median(window[: max(5, window.size // 5)])
+    thr = max(base * 1.8, base + 20)
+    for i, v in enumerate(window):
+        if v >= thr:
+            return (h - lo) - i
+    return None
 
     x1 = find_boundary_from_left(col_s, x_lo, x_hi)
     x2 = find_boundary_from_right(col_s, x_lo, x_hi)
@@ -242,6 +236,13 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
     cv2.rectangle(dbg, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 255), 3)
     dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
     return (int(x1), int(y1), int(x2), int(y2)), dbg_rgb
+
+    # shrink inner boundary slightly inward to avoid grabbing outer glow/halo edges
+    pad = int(min(h, w) * 0.006)  # ~0.6% of size (tuneable)
+    x1 += pad; y1 += pad; x2 -= pad; y2 -= pad
+
+    if x2 <= x1 or y2 <= y1:
+    return None, dbg_rgb
 
 
 # -----------------------------

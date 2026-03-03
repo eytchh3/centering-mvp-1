@@ -178,11 +178,10 @@ def find_outer_card_quad(img_bgr: np.ndarray):
 def find_inner_boundary_rect(warped_bgr: np.ndarray):
     """
     Stable inner boundary:
-      - detect L/R rails from mid-band
+      - detect L/R rails from mid-band (works well)
       - detect top rail near top
-      - predict bottom using outer aspect + inner width
-      - snap bottom ONLY near predicted location (prevents grabbing player leg/nameplate)
-    Returns: (rect or None, debug_rgb)
+      - compute bottom from geometry (NO searching/snapping)
+      - validate with edge-strength checks; else return UNCERTAIN
     """
     h, w = warped_bgr.shape[:2]
     gray = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2GRAY)
@@ -204,65 +203,60 @@ def find_inner_boundary_rect(warped_bgr: np.ndarray):
     row = edges[:, xC1:xC2].sum(axis=1) / 255.0
     row_s = smooth1d(row, k=max(31, h // 45))
 
+    # Search windows near edges
     x_lo, x_hi = int(w * 0.02), int(w * 0.14)
     y_lo, y_hi = int(h * 0.02), int(h * 0.14)
 
-    # L/R from gradients
+    dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+
+    # L/R rails from gradients
     winL = col_s[x_lo:x_hi]
     winR = col_s[w - x_hi:w - x_lo][::-1]
     if winL.size < 10 or winR.size < 10:
-        dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
         return None, cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
 
     x1 = x_lo + int(np.argmax(np.abs(np.diff(winL))))
     x2 = (w - x_lo) - int(np.argmax(np.abs(np.diff(winR))))
 
     if x2 <= x1 + int(w * 0.30):
-        dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
         return None, cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
 
-    # Top from gradients
+    # Top rail from gradient
     winT = row_s[y_lo:y_hi]
     if winT.size < 10:
-        dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
         return None, cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
 
     y1 = y_lo + int(np.argmax(np.abs(np.diff(winT))))
 
-    # Predict bottom and snap locally
+    # Geometry: compute bottom directly (no searching)
     outer_aspect = h / float(w)
     inner_w = float(x2 - x1)
     expected_h = float(np.clip(inner_w * outer_aspect, h * 0.55, h * 0.92))
-    y2_pred = int(y1 + expected_h)
+    y2 = int(y1 + expected_h)
 
-    radius = int(h * 0.05)
-    loB = max(0, y2_pred - radius)
-    hiB = min(h - 2, y2_pred + radius)
-
-    # Avoid absolute bottom (nameplate/stands)
-    hiB = min(hiB, int(h * 0.90))
-
-    if hiB - loB < 15:
-        dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+    # Hard bounds: don't allow bottom to fall into the extreme nameplate zone
+    if y2 > int(h * 0.90):
         return None, cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
 
-    winB = row_s[loB:hiB]
-    gradB = np.abs(np.diff(winB))
-    if gradB.size < 5:
-        dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+    if y2 <= y1 + int(h * 0.35):
         return None, cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
 
-    y2 = loB + int(np.argmax(gradB))
+    # Validate: the predicted bottom line should have a strong edge response
+    # Check mean edge strength along a horizontal strip around y2 between x1..x2
+    band = 3
+    y_lo2 = max(0, y2 - band)
+    y_hi2 = min(h, y2 + band + 1)
+    x_lo2 = max(0, int(x1 + inner_w * 0.10))
+    x_hi2 = min(w, int(x2 - inner_w * 0.10))
 
-    # Aspect consistency
-    inner_h = float(y2 - y1)
-    if inner_h <= 0:
-        dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+    if x_hi2 - x_lo2 < 20:
         return None, cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
 
-    aspect_inner = inner_h / inner_w
-    if abs(aspect_inner - outer_aspect) > 0.10:
-        dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+    bottom_strength = edges[y_lo2:y_hi2, x_lo2:x_hi2].mean()
+    top_strength = edges[max(0, y1 - band):min(h, y1 + band + 1), x_lo2:x_hi2].mean()
+
+    # If bottom isn't at least "reasonably strong" compared to top, bail
+    if bottom_strength < max(15.0, 0.45 * top_strength):
         return None, cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
 
     # Small inset to avoid halo edges
@@ -270,10 +264,8 @@ def find_inner_boundary_rect(warped_bgr: np.ndarray):
     x1 += pad; y1 += pad; x2 -= pad; y2 -= pad
 
     if x2 <= x1 or y2 <= y1:
-        dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
         return None, cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
 
-    dbg = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
     cv2.rectangle(dbg, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 255), 3)
     return (int(x1), int(y1), int(x2), int(y2)), cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
 

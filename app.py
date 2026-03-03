@@ -59,13 +59,18 @@ def warp_card(img_bgr: np.ndarray, quad: np.ndarray, out_w: int = 900):
 # -----------------------------
 def find_outer_card_quad(img_bgr: np.ndarray):
     """
-    Robust card outline detection:
-    - edge map
-    - pick largest contour
-    - fit rotated rectangle via minAreaRect
-    This is more tolerant of messy backgrounds than "exact 4-corner contour".
+    Robust outer card detection for listing photos with stands/toploaders.
+    - Ignore bottom region (stands)
+    - Evaluate multiple contours, pick the best "card-like" rotated rectangle
+    Returns: (quad_points, edge_map)
     """
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    H, W = img_bgr.shape[:2]
+
+    # 1) Ignore stand area (bottom chunk)
+    cut = int(H * 0.78)
+    work = img_bgr[:cut, :].copy()
+
+    gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
     edges = cv2.Canny(gray, 40, 130)
@@ -76,16 +81,44 @@ def find_outer_card_quad(img_bgr: np.ndarray):
     if not cnts:
         return None, edges
 
-    c = max(cnts, key=cv2.contourArea)
+    # Card aspect ratio tolerance (w/h)
+    target = 2.5 / 3.5  # ~0.714
+    lo, hi = 0.62, 0.80
 
-    # Reject tiny detections (helps when UI/background dominates)
-    if cv2.contourArea(c) < 0.03 * (img_bgr.shape[0] * img_bgr.shape[1]):
+    best_box = None
+    best_score = -1
+
+    # 2) Try several candidates, not just "largest"
+    for c in sorted(cnts, key=cv2.contourArea, reverse=True)[:25]:
+        area = cv2.contourArea(c)
+        if area < 0.03 * (work.shape[0] * work.shape[1]):
+            continue
+
+        rect = cv2.minAreaRect(c)
+        (cx, cy), (rw, rh), angle = rect
+        if rw < 50 or rh < 50:
+            continue
+
+        # compute aspect w/h where h is longer side
+        w_rect, h_rect = (rw, rh) if rw <= rh else (rh, rw)
+        aspect = w_rect / h_rect
+
+        if not (lo <= aspect <= hi):
+            continue
+
+        # score: prefer large area + aspect close to target
+        score = area * (1.0 - abs(aspect - target))
+        if score > best_score:
+            best_score = score
+            best_box = cv2.boxPoints(rect)
+
+    if best_box is None:
         return None, edges
 
-    rect = cv2.minAreaRect(c)
-    box = cv2.boxPoints(rect)
-    box = np.array(box, dtype="float32")
+    box = np.array(best_box, dtype="float32")
 
+    # Because we cropped, points are already correct in x/y (only y is within cropped region).
+    # No offset needed since crop starts at y=0.
     return box, edges
 
 

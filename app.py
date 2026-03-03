@@ -199,10 +199,17 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
             return None
         base = np.median(window[: max(5, window.size // 5)])
         thr = max(base * 1.8, base + 20)
+
+        # First-hit (preferred)
         for i, v in enumerate(window):
             if v >= thr:
                 return lo + i
-        return None
+
+        # Fallback: strongest gradient within the band (still near edge)
+        grad = np.abs(np.diff(window))
+        if grad.size == 0:
+            return None
+        return lo + int(np.argmax(grad))
 
     def find_boundary_from_bottom(profile, lo, hi):
         window = profile[h - hi : h - lo][::-1]
@@ -210,10 +217,17 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
             return None
         base = np.median(window[: max(5, window.size // 5)])
         thr = max(base * 1.8, base + 20)
+
+        # First-hit (preferred)
         for i, v in enumerate(window):
             if v >= thr:
                 return (h - lo) - i
-        return None
+
+        # Fallback: strongest gradient within the band
+        grad = np.abs(np.diff(window))
+        if grad.size == 0:
+            return None
+        return (h - lo) - int(np.argmax(grad))
 
     x1 = find_boundary_from_left(col_s, x_lo, x_hi)
     x2 = find_boundary_from_right(col_s, x_lo, x_hi)

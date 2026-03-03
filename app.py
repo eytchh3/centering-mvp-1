@@ -95,74 +95,97 @@ def find_outer_card_quad(img_bgr: np.ndarray):
 # -----------------------------
 def find_inner_frame_rect(warped_bgr: np.ndarray):
     """
-    Detect an inner frame rectangle inside the (already warped) card image.
-    Approach:
-    - local contrast enhancement (CLAHE)
-    - adaptive threshold to isolate edge structure
-    - morphology close to connect frame lines
-    - choose best interior rectangle contour
-    Returns (x1,y1,x2,y2) in warped image coords, or None.
+    Inner frame detection via strong straight lines:
+    - edge detect
+    - Hough lines
+    - pick 2 vertical + 2 horizontal lines that form a rectangle
+    Returns: (rect, debug_img)
+      rect = (x1,y1,x2,y2) or None
+      debug_img = RGB image showing detected lines
     """
     h, w = warped_bgr.shape[:2]
 
     gray = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bilateralFilter(gray, 7, 50, 50)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
+    # edges (less speckle than adaptive threshold)
+    edges = cv2.Canny(gray, 60, 160)
 
-    th = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        31, 7
+    # close small gaps in the frame lines
+    k = max(3, min(h, w) // 250)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    # Hough line transform
+    lines = cv2.HoughLinesP(
+        edges, 1, np.pi / 180,
+        threshold=120,
+        minLineLength=int(min(h, w) * 0.35),
+        maxLineGap=int(min(h, w) * 0.03)
     )
 
-    k = max(3, min(h, w) // 200)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel, iterations=2)
+    debug = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+    if lines is None:
+        debug_rgb = cv2.cvtColor(debug, cv2.COLOR_BGR2RGB)
+        return None, debug_rgb
 
-    cnts, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    margin = int(min(h, w) * 0.04)  # must be clearly inside card
-    best = None
-    best_score = -1.0
-
-    # approximate overall aspect ratio of the warped card
-    card_aspect = w / max(1, h)
-
-    for c in cnts:
-        area = cv2.contourArea(c)
-        if area < (h * w) * 0.06:
+    # classify lines as vertical-ish or horizontal-ish
+    vertical = []
+    horizontal = []
+    for x1, y1, x2, y2 in lines[:, 0]:
+        dx = x2 - x1
+        dy = y2 - y1
+        length = (dx * dx + dy * dy) ** 0.5
+        if length < 50:
             continue
+        # angle test
+        if abs(dx) < abs(dy) * 0.35:
+            # vertical-ish: store average x
+            vertical.append((int((x1 + x2) / 2), length, (x1, y1, x2, y2)))
+        elif abs(dy) < abs(dx) * 0.35:
+            # horizontal-ish: store average y
+            horizontal.append((int((y1 + y2) / 2), length, (x1, y1, x2, y2)))
 
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-        if len(approx) != 4:
-            continue
+    # draw debug lines
+    for _, _, (x1, y1, x2, y2) in vertical:
+        cv2.line(debug, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    for _, _, (x1, y1, x2, y2) in horizontal:
+        cv2.line(debug, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-        x, y, ww, hh = cv2.boundingRect(approx)
-        if x < margin or y < margin or (x + ww) > (w - margin) or (y + hh) > (h - margin):
-            continue
+    margin = int(min(h, w) * 0.06)
 
-        rect_area = ww * hh
-        if rect_area <= 0:
-            continue
+    # keep only interior-ish candidates (ignore outer border)
+    vertical = [v for v in vertical if margin < v[0] < (w - margin)]
+    horizontal = [u for u in horizontal if margin < u[0] < (h - margin)]
 
-        fill_ratio = area / rect_area
-        aspect = ww / max(1, hh)
+    if len(vertical) < 2 or len(horizontal) < 2:
+        debug_rgb = cv2.cvtColor(debug, cv2.COLOR_BGR2RGB)
+        return None, debug_rgb
 
-        # Score favors: large interior rectangles, reasonable "frame-like" fill ratio,
-        # and aspect not wildly off from card aspect.
-        score = rect_area
-        score *= (1.0 - abs(fill_ratio - 0.85))  # frames often ~0.7-0.95 depending on thresholding
-        score *= (1.0 - min(0.9, abs(aspect - card_aspect) * 0.2))
+    # pick best left/right: far apart, strong lines
+    vertical.sort(key=lambda t: t[0])
+    left = max(vertical[: max(1, len(vertical)//2)], key=lambda t: t[1])
+    right = max(vertical[len(vertical)//2 :], key=lambda t: t[1])
 
-        if score > best_score:
-            best_score = score
-            best = (x, y, x + ww, y + hh)
+    # pick best top/bottom
+    horizontal.sort(key=lambda t: t[0])
+    top = max(horizontal[: max(1, len(horizontal)//2)], key=lambda t: t[1])
+    bottom = max(horizontal[len(horizontal)//2 :], key=lambda t: t[1])
 
-    return best, th
+    xL, xR = left[0], right[0]
+    yT, yB = top[0], bottom[0]
+
+    # sanity checks
+    if xR - xL < int(w * 0.40) or yB - yT < int(h * 0.40):
+        debug_rgb = cv2.cvtColor(debug, cv2.COLOR_BGR2RGB)
+        return None, debug_rgb
+
+    rect = (xL, yT, xR, yB)
+
+    # draw the chosen rectangle in yellow
+    cv2.rectangle(debug, (xL, yT), (xR, yB), (0, 255, 255), 3)
+    debug_rgb = cv2.cvtColor(debug, cv2.COLOR_BGR2RGB)
+    return rect, debug_rgb
 
 
 # -----------------------------
@@ -251,18 +274,17 @@ def analyze(img_pil: Image.Image):
             Image.fromarray(edge_rgb),
         )
 
-    inner, th = find_inner_frame_rect(warped)
+    inner, dbg = find_inner_frame_rect(warped)
     h, w = warped.shape[:2]
 
     overlay = warped.copy()
 
     if inner is None:
-        th_rgb = cv2.cvtColor(th, cv2.COLOR_GRAY2RGB)
-        return (
-            "Insufficient evidence: could not reliably detect INNER printed frame.\n"
-            "Debug image shows what the frame detector sees (white = detected structures).\n",
-            Image.fromarray(th_rgb),
-        )
+    return (
+        "Insufficient evidence: could not reliably detect INNER printed frame.\n"
+        "Debug image shows detected lines (green=vertical, blue=horizontal).\n",
+        Image.fromarray(dbg),
+    )
 
     # Gaps from OUTER card edge to INNER frame
     gL = int(x1)

@@ -260,17 +260,23 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
         dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
         return None, dbg_rgb
 
+    # NEW: prevent bottom snapping into nameplate region
+    if (h - y2) > int(h * 0.20):
+        dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
+        return None, dbg_rgb
+
+    # shrink inner boundary slightly inward to avoid glow/halo edges
+    pad = int(min(h, w) * 0.006)
+    x1 += pad; y1 += pad; x2 -= pad; y2 -= pad
+
+    if x2 <= x1 or y2 <= y1:
+        dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
+        return None, dbg_rgb
+
     # Draw boundary lines (yellow)
     cv2.rectangle(dbg, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 255), 3)
     dbg_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
     return (int(x1), int(y1), int(x2), int(y2)), dbg_rgb
-
-    # shrink inner boundary slightly inward to avoid grabbing outer glow/halo edges
-    pad = int(min(h, w) * 0.006)  # ~0.6% of size (tuneable)
-    x1 += pad; y1 += pad; x2 -= pad; y2 -= pad
-
-    if x2 <= x1 or y2 <= y1:
-        return None, dbg_rgb
 
 
 # -----------------------------
@@ -360,13 +366,6 @@ def analyze(img_pil: Image.Image):
         )
 
     inner, dbg = find_inner_frame_rect(warped)
-
-    if inner is None:
-        return (
-            "Insufficient evidence: could not reliably detect INNER printed frame boundary.\n"
-            "Debug image shows detected edges + the attempted boundary box (if any).",
-            Image.fromarray(dbg),
-        )
 
     x1, y1, x2, y2 = inner  # <-- ADD THIS
 

@@ -10,6 +10,7 @@ PSA_LIMIT = 0.55
 CLEAR_PASS_MAX = 0.54
 BORDERLINE_HIGH = 0.56
 INNER_ASPECT_SCALE = 1.035
+INNER_PAD_FRAC = 0.0025
 
 # -----------------------------
 # Geometry helpers
@@ -250,7 +251,7 @@ def find_inner_boundary_rect(warped_bgr: np.ndarray):
             confident = False
 
     # Inset pad (avoid halo)
-    pad = int(min(h, w) * 0.006)
+    pad = int(min(h, w) * INNER_PAD_FRAC)
     x1p = int(x1 + pad)
     y1p = int(y1 + pad)
     x2p = int(x2 - pad)

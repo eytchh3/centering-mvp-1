@@ -196,17 +196,77 @@ def find_inner_general(warped_bgr: np.ndarray):
 
     inner_w = float(x2 - x1)
 
-    # Height from outer aspect (general)
-outer_aspect = h / float(w)
-base_inner_h = inner_w * outer_aspect * INNER_HEIGHT_SCALE
+    # X-range to score horizontal rails (avoid edges / logos)
+    padx0 = int(x1 + inner_w * 0.10)
+    padx1 = int(x2 - inner_w * 0.10)
+    padx0 = max(0, padx0)
+    padx1 = min(w, padx1)
+    if padx1 - padx0 < 40:
+        return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
-# Score function (same as before)
-padx0 = int(x1 + inner_w * 0.10)
-padx1 = int(x2 - inner_w * 0.10)
-padx0 = max(0, padx0)
-padx1 = min(w, padx1)
-if padx1 - padx0 < 40:
-    return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+    def line_strength(y: int) -> float:
+        y0 = max(0, y - EDGE_BAND)
+        y1b = min(h, y + EDGE_BAND + 1)
+        return float(sy[y0:y1b, padx0:padx1].mean())
+
+    # Base height from outer aspect
+    outer_aspect = h / float(w)
+    base_inner_h = inner_w * outer_aspect * INNER_HEIGHT_SCALE
+
+    y_start = int(h * Y_SCAN_TOP)
+    step = max(2, int(h * Y_SCAN_STEP_FRAC))
+
+    best = None
+    best_score = -1.0
+
+    # Try multiple height scales per image
+    for s in INNER_H_SCALES:
+        inner_h = float(np.clip(base_inner_h * s, h * 0.55, h * 0.92))
+        y_end = int(h * Y_SCAN_BOTTOM - inner_h)
+        if y_end <= y_start:
+            continue
+
+        for y_top in range(y_start, y_end, step):
+            y_bot = int(y_top + inner_h)
+
+            s_top = line_strength(y_top)
+            s_bot = line_strength(y_bot)
+
+            # Prefer both strong and similar; penalize lopsided matches
+            score = (s_top + s_bot) - 0.5 * abs(s_top - s_bot)
+
+            if score > best_score:
+                best_score = score
+                best = (y_top, y_bot, s_top, s_bot)
+
+    if best is None:
+        return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+
+    y1, y2, sT, sB = best
+
+    # Confidence threshold
+    confident = (sT > 6.0) and (sB > 6.0)
+
+    # Apply small inset pad
+    pad = int(min(h, w) * INNER_PAD_FRAC)
+    x1p = int(x1 + pad)
+    x2p = int(x2 - pad)
+    y1p = int(y1 + pad)
+    y2p = int(y2 - pad)
+
+    if x2p <= x1p or y2p <= y1p:
+        return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+
+    color = (255, 0, 0) if confident else (0, 165, 255)
+
+    # Draw thin box + hash lines
+    cv2.rectangle(overlay, (x1p, y1p), (x2p, y2p), color, 2)
+    cv2.line(overlay, (x1p, 0), (x1p, h - 1), color, 1)
+    cv2.line(overlay, (x2p, 0), (x2p, h - 1), color, 1)
+    cv2.line(overlay, (0, y1p), (w - 1, y1p), color, 1)
+    cv2.line(overlay, (0, y2p), (w - 1, y2p), color, 1)
+
+    return (x1p, y1p, x2p, y2p), confident, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
 def line_strength(y: int) -> float:
     y0 = max(0, y - EDGE_BAND)

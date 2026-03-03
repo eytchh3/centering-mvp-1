@@ -150,7 +150,9 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
     xA, xB = int(w * 0.10), int(w * 0.90)
 
     col = edges[yA:yB, :].sum(axis=0) / 255.0
-    row = edges[:, xA:xB].sum(axis=1) / 255.0
+    # For top/bottom boundary, use a central vertical strip to avoid nameplate/logo edges
+    xC1, xC2 = int(w * 0.25), int(w * 0.75)
+    row = edges[:, xC1:xC2].sum(axis=1) / 255.0
 
     col_s = smooth1d(col, k=max(25, w // 60))
     row_s = smooth1d(row, k=max(25, h // 60))

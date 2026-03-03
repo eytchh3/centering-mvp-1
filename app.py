@@ -17,6 +17,8 @@ INNER_PAD_FRAC = 0.002      # small inset to avoid halo/glow edges
 Y_SCAN_TOP = 0.06           # don't search too close to top
 Y_SCAN_BOTTOM = 0.92        # don't search too close to bottom
 Y_SCAN_STEP_FRAC = 0.004    # step as fraction of height (smaller = slower but more precise)
+# Try a few inner-height scales per image (general-purpose)
+INNER_H_SCALES = [0.97, 1.00, 1.03]
 EDGE_BAND = 3               # pixels above/below line to score horizontal rail strength
 
 
@@ -195,48 +197,51 @@ def find_inner_general(warped_bgr: np.ndarray):
     inner_w = float(x2 - x1)
 
     # Height from outer aspect (general)
-    outer_aspect = h / float(w)
-    inner_h = inner_w * outer_aspect * INNER_HEIGHT_SCALE
-    inner_h = float(np.clip(inner_h, h * 0.55, h * 0.92))
+outer_aspect = h / float(w)
+base_inner_h = inner_w * outer_aspect * INNER_HEIGHT_SCALE
 
-    # Score function: horizontal energy around y for top and around y+inner_h for bottom
-    padx0 = int(x1 + inner_w * 0.10)
-    padx1 = int(x2 - inner_w * 0.10)
-    padx0 = max(0, padx0)
-    padx1 = min(w, padx1)
-    if padx1 - padx0 < 40:
-        return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+# Score function (same as before)
+padx0 = int(x1 + inner_w * 0.10)
+padx1 = int(x2 - inner_w * 0.10)
+padx0 = max(0, padx0)
+padx1 = min(w, padx1)
+if padx1 - padx0 < 40:
+    return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
-    def line_strength(y: int) -> float:
-        y0 = max(0, y - EDGE_BAND)
-        y1 = min(h, y + EDGE_BAND + 1)
-        return float(sy[y0:y1, padx0:padx1].mean())
+def line_strength(y: int) -> float:
+    y0 = max(0, y - EDGE_BAND)
+    y1b = min(h, y + EDGE_BAND + 1)
+    return float(sy[y0:y1b, padx0:padx1].mean())
 
-    y_start = int(h * Y_SCAN_TOP)
+y_start = int(h * Y_SCAN_TOP)
+step = max(2, int(h * Y_SCAN_STEP_FRAC))
+
+best = None
+best_score = -1.0
+
+for s in INNER_H_SCALES:
+    inner_h = float(np.clip(base_inner_h * s, h * 0.55, h * 0.92))
     y_end = int(h * Y_SCAN_BOTTOM - inner_h)
-    step = max(2, int(h * Y_SCAN_STEP_FRAC))
     if y_end <= y_start:
-        return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
-
-    best = None
-    best_score = -1.0
+        continue
 
     for y_top in range(y_start, y_end, step):
         y_bot = int(y_top + inner_h)
+
         s_top = line_strength(y_top)
         s_bot = line_strength(y_bot)
 
-        # Prefer both being strong, but penalize if one is super weak
+        # Prefer both strong and similar; penalize lopsided matches
         score = (s_top + s_bot) - 0.5 * abs(s_top - s_bot)
 
         if score > best_score:
             best_score = score
             best = (y_top, y_bot, s_top, s_bot)
 
-    if best is None:
-        return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+if best is None:
+    return None, False, cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
-    y1, y2, sT, sB = best
+y1, y2, sT, sB = best
 
     # Confidence: both rails must exceed a minimal strength
     # (this is adaptive-ish because sy scale varies, but works okay)

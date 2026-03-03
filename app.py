@@ -162,7 +162,7 @@ def find_inner_frame_rect(warped_bgr: np.ndarray):
             best_score = score
             best = (x, y, x + ww, y + hh)
 
-    return best
+    return best, th
 
 
 # -----------------------------
@@ -251,24 +251,18 @@ def analyze(img_pil: Image.Image):
             Image.fromarray(edge_rgb),
         )
 
-    inner = find_inner_frame_rect(warped)
+    inner, th = find_inner_frame_rect(warped)
     h, w = warped.shape[:2]
 
     overlay = warped.copy()
 
     if inner is None:
-        # show warped view with note (still useful to see what got warped)
-        cv2.putText(overlay, "INNER FRAME NOT FOUND", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-        overlay_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
-        return (
-            "Insufficient evidence: could not reliably detect INNER printed frame.\n"
-            "- Try a straighter-on front photo.\n"
-            "- Ensure the inner frame/border is clearly visible (not washed out by glare).\n",
-            Image.fromarray(overlay_rgb),
-        )
-
-    x1, y1, x2, y2 = inner
+    th_rgb = cv2.cvtColor(th, cv2.COLOR_GRAY2RGB)
+    return (
+        "Insufficient evidence: could not reliably detect INNER printed frame.\n"
+        "Debug image shows what the frame detector sees (white = detected structures).\n",
+        Image.fromarray(th_rgb),
+    )
 
     # Gaps from OUTER card edge to INNER frame
     gL = int(x1)

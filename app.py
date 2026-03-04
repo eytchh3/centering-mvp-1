@@ -251,7 +251,7 @@ def analyze(img_pil):
 demo = gr.Interface(
     fn=analyze,
     inputs=gr.Image(type="pil"),
-    outputs=["text", "image", "image"],
+    outputs=["text", "image", "image", "image", "text"],
 )
 
 if __name__ == "__main__":

@@ -62,9 +62,18 @@ def find_outer_card_quad(img_bgr):
             peri = cv2.arcLength(c, True)
             approx = cv2.approxPolyDP(c, 0.02 * peri, True)
 
-            if len(approx) == 4 and area > best_area:
+            if len(approx) != 4:
+                continue
+
+            quad = approx.reshape(4, 2)
+            xs = quad[:, 0]
+            ys = quad[:, 1]
+            if (xs < 10).any() or (ys < 10).any() or (xs > (W - 11)).any() or (ys > (H - 11)).any():
+                continue
+
+            if area > best_area:
                 best_area = area
-                best = approx.reshape(4, 2)
+                best = quad
 
         return best
 
@@ -80,10 +89,12 @@ def find_outer_card_quad(img_bgr):
     if best is not None:
         return best
 
+
     gray_fb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray_fb, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+
 
     cnts_fb, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return _select_best_quad_from_contours(cnts_fb, H, W)

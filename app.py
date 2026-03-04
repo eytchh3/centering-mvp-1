@@ -233,7 +233,16 @@ def analyze(img_pil):
         quad_i = cand["quad"].astype(np.int32)
         cv2.polylines(candidates_debug, [quad_i], isClosed=True, color=(0, 0, 255), thickness=2)
         label_pt = tuple(quad_i[0])
-        cv2.putText(candidates_debug, str(idx), (int(label_pt[0]) + 4, int(label_pt[1]) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.putText(
+            candidates_debug,
+            str(idx),
+            (int(label_pt[0]) + 4, int(label_pt[1]) - 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
 
         lines.append(
             f"{idx}: area={cand['area']:.1f}, aspect(h/w)={cand['aspect_hw']:.3f}, path={cand['source']}"
@@ -258,7 +267,13 @@ def analyze(img_pil):
 
     inner, overlay = find_inner_general(warped)
     if inner is None:
-        return "UNCERTAIN: could not detect inner boundary.", Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)), debug_img, candidates_img, candidates_text
+        return (
+            "UNCERTAIN: could not detect inner boundary.",
+            Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)),
+            debug_img,
+            candidates_img,
+            candidates_text,
+        )
 
     x1, y1, x2, y2 = inner
     h, w = warped.shape[:2]

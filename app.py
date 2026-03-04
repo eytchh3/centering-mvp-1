@@ -52,7 +52,8 @@ def order_points(pts):
 def find_outer_card_quad(img_bgr):
     def _select_best_quad_from_contours(cnts, H, W):
         best = None
-        best_area = 0
+
+        best_aspect_error = None
 
         for c in cnts:
             area = cv2.contourArea(c)
@@ -71,8 +72,13 @@ def find_outer_card_quad(img_bgr):
             if (xs < 10).any() or (ys < 10).any() or (xs > (W - 11)).any() or (ys > (H - 11)).any():
                 continue
 
-            if area > best_area:
-                best_area = area
+            _, _, w_box, h_box = cv2.boundingRect(quad.astype(np.float32))
+            if w_box <= 0:
+                continue
+
+            aspect_error = abs((h_box / float(w_box)) - 1.4)
+            if best_aspect_error is None or aspect_error < best_aspect_error:
+                best_aspect_error = aspect_error
                 best = quad
 
         return best
@@ -89,12 +95,10 @@ def find_outer_card_quad(img_bgr):
     if best is not None:
         return best
 
-
     gray_fb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray_fb, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-
 
     cnts_fb, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return _select_best_quad_from_contours(cnts_fb, H, W)

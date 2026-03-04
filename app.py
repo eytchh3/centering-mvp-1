@@ -52,6 +52,7 @@ def order_points(pts):
 def find_outer_card_quad(img_bgr):
     def _select_best_quad_from_contours(cnts, H, W):
         best = None
+
         best_aspect_error = None
 
         for c in cnts:

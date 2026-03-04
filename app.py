@@ -50,6 +50,33 @@ def order_points(pts):
 # =============================
 
 def find_outer_card_quad(img_bgr):
+    def _select_best_quad_from_contours(cnts, H, W):
+        best = None
+        best_area = 0
+
+        for c in cnts:
+            area = cv2.contourArea(c)
+            if area < 0.05 * H * W:
+                continue
+
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+
+            if len(approx) != 4:
+                continue
+
+            quad = approx.reshape(4, 2)
+            xs = quad[:, 0]
+            ys = quad[:, 1]
+            if (xs < 10).any() or (ys < 10).any() or (xs > (W - 11)).any() or (ys > (H - 11)).any():
+                continue
+
+            if area > best_area:
+                best_area = area
+                best = quad
+
+        return best
+
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
@@ -57,27 +84,18 @@ def find_outer_card_quad(img_bgr):
     edges = cv2.dilate(edges, None, iterations=2)
 
     cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not cnts:
-        return None
-
     H, W = img_bgr.shape[:2]
-    best = None
-    best_area = 0
+    best = _select_best_quad_from_contours(cnts, H, W)
+    if best is not None:
+        return best
 
-    for c in cnts:
-        area = cv2.contourArea(c)
-        if area < 0.05 * H * W:
-            continue
+    gray_fb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray_fb, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-
-        if len(approx) == 4:
-            if area > best_area:
-                best_area = area
-                best = approx.reshape(4, 2)
-
-    return best
+    cnts_fb, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return _select_best_quad_from_contours(cnts_fb, H, W)
 
 
 def warp_card(img_bgr, quad):
@@ -183,18 +201,26 @@ def classify_centering(gL, gR, gT, gB):
 
 def analyze(img_pil):
     img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    debug = img.copy()
 
     quad = find_outer_card_quad(img)
     if quad is None:
-        return "Could not detect outer card.", img_pil
+        debug_img = Image.fromarray(cv2.cvtColor(debug, cv2.COLOR_BGR2RGB))
+        return "Could not detect outer card.", img_pil, debug_img
+
+    quad_int = quad.astype(np.int32)
+    cv2.polylines(debug, [quad_int], isClosed=True, color=(0, 0, 255), thickness=3)
+    for x, y in quad_int:
+        cv2.circle(debug, (int(x), int(y)), radius=6, color=(0, 0, 255), thickness=-1)
+    debug_img = Image.fromarray(cv2.cvtColor(debug, cv2.COLOR_BGR2RGB))
 
     warped = warp_card(img, quad)
     if warped is None:
-        return "Warp failed.", img_pil
+        return "Warp failed.", img_pil, debug_img
 
     inner, overlay = find_inner_general(warped)
     if inner is None:
-        return "UNCERTAIN: could not detect inner boundary.", Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+        return "UNCERTAIN: could not detect inner boundary.", Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)), debug_img
 
     x1, y1, x2, y2 = inner
     h, w = warped.shape[:2]
@@ -213,13 +239,13 @@ def analyze(img_pil):
         f"Bucket: {bucket}"
     )
 
-    return msg, Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+    return msg, Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)), debug_img
 
 
 demo = gr.Interface(
     fn=analyze,
     inputs=gr.Image(type="pil"),
-    outputs=["text", "image"],
+    outputs=["text", "image", "image"],
 )
 
 if __name__ == "__main__":

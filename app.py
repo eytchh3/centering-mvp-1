@@ -209,7 +209,7 @@ def analyze(img_pil):
     img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
     debug = img.copy()
 
-    quad = find_outer_card_quad(img)
+    quad, candidates = find_outer_card_quad(img)
     if quad is None:
         debug_img = Image.fromarray(cv2.cvtColor(debug, cv2.COLOR_BGR2RGB))
         return "Could not detect outer card.", img_pil, debug_img

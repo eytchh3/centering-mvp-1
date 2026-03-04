@@ -192,18 +192,26 @@ def classify_centering(gL, gR, gT, gB):
 
 def analyze(img_pil):
     img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    debug = img.copy()
 
     quad = find_outer_card_quad(img)
     if quad is None:
-        return "Could not detect outer card.", img_pil
+        debug_img = Image.fromarray(cv2.cvtColor(debug, cv2.COLOR_BGR2RGB))
+        return "Could not detect outer card.", img_pil, debug_img
+
+    quad_int = quad.astype(np.int32)
+    cv2.polylines(debug, [quad_int], isClosed=True, color=(0, 0, 255), thickness=3)
+    for x, y in quad_int:
+        cv2.circle(debug, (int(x), int(y)), radius=6, color=(0, 0, 255), thickness=-1)
+    debug_img = Image.fromarray(cv2.cvtColor(debug, cv2.COLOR_BGR2RGB))
 
     warped = warp_card(img, quad)
     if warped is None:
-        return "Warp failed.", img_pil
+        return "Warp failed.", img_pil, debug_img
 
     inner, overlay = find_inner_general(warped)
     if inner is None:
-        return "UNCERTAIN: could not detect inner boundary.", Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+        return "UNCERTAIN: could not detect inner boundary.", Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)), debug_img
 
     x1, y1, x2, y2 = inner
     h, w = warped.shape[:2]
@@ -222,13 +230,13 @@ def analyze(img_pil):
         f"Bucket: {bucket}"
     )
 
-    return msg, Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+    return msg, Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)), debug_img
 
 
 demo = gr.Interface(
     fn=analyze,
     inputs=gr.Image(type="pil"),
-    outputs=["text", "image"],
+    outputs=["text", "image", "image"],
 )
 
 if __name__ == "__main__":

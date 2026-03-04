@@ -50,6 +50,24 @@ def order_points(pts):
 # =============================
 
 def find_outer_card_quad(img_bgr):
+    def _select_best_quad_from_contours(cnts, H, W):
+        best = None
+        best_area = 0
+
+        for c in cnts:
+            area = cv2.contourArea(c)
+            if area < 0.05 * H * W:
+                continue
+
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+
+            if len(approx) == 4 and area > best_area:
+                best_area = area
+                best = approx.reshape(4, 2)
+
+        return best
+
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
@@ -57,27 +75,18 @@ def find_outer_card_quad(img_bgr):
     edges = cv2.dilate(edges, None, iterations=2)
 
     cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not cnts:
-        return None
-
     H, W = img_bgr.shape[:2]
-    best = None
-    best_area = 0
+    best = _select_best_quad_from_contours(cnts, H, W)
+    if best is not None:
+        return best
 
-    for c in cnts:
-        area = cv2.contourArea(c)
-        if area < 0.05 * H * W:
-            continue
+    gray_fb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray_fb, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-
-        if len(approx) == 4:
-            if area > best_area:
-                best_area = area
-                best = approx.reshape(4, 2)
-
-    return best
+    cnts_fb, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return _select_best_quad_from_contours(cnts_fb, H, W)
 
 
 def warp_card(img_bgr, quad):
